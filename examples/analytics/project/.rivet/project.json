@@ -1,0 +1,12 @@
+{
+  "collections": {
+    "actions": {
+      "schema": "tracker-action@1",
+      "files": [
+        "tracking/*.md"
+      ],
+      "section": "Action",
+      "level": 2
+    }
+  }
+}

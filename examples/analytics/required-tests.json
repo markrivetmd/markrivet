@@ -1,0 +1,73 @@
+[
+  {
+    "package": "markrivet-cli",
+    "target": [
+      "--test",
+      "cli"
+    ],
+    "phases": {
+      "1": [
+        "analytics_cases::analytics_metadata_empty_documents",
+        "analytics_cases::analytics_defaults_provenance_legacy_equivalence",
+        "analytics_cases::analytics_optional_required_null_and_default_errors",
+        "analytics_cases::analytics_invalid_sibling_unknown_and_strict_write",
+        "analytics_cases::analytics_frontmatter_recognition_and_unknown_presence",
+        "analytics_cases::analytics_missing_and_ambiguous_binding",
+        "analytics_cases::analytics_metadata_readonly_guard_isolation",
+        "analytics_cases::analytics_duplicate_and_unstamped_identity",
+        "analytics_cases::analytics_native_filenames_and_exclusions",
+        "analytics_cases::analytics_declaration_selection_and_refusals",
+        "analytics_cases::analytics_item_origin_namespace_collision",
+        "analytics_cases::analytics_filtered_diagnostics_are_bounded"
+      ],
+      "2": [
+        "analytics_cases::analytics_group_counts_distinct_paging_and_top",
+        "analytics_cases::analytics_facet_state_partition_and_filter",
+        "analytics_cases::analytics_conditional_unknown_and_distinct_exclusions",
+        "analytics_cases::analytics_string_order_paging_facets_and_top_ties"
+      ],
+      "3": [
+        "analytics_cases::analytics_view_export_replay_and_live_changes",
+        "analytics_cases::analytics_measure_drilldown_and_changed_data",
+        "analytics_cases::analytics_failed_file_replay_and_byte_preservation",
+        "analytics_cases::analytics_bundle_corruption_versions_and_confinement",
+        "analytics_cases::analytics_capture_once_without_reread",
+        "analytics_cases::analytics_documented_example",
+        "analytics_cases::analytics_definitions_capture_once",
+        "analytics_cases::analytics_replay_returns_verified_read",
+        "analytics_cases::analytics_strict_drilldown_changed_invalid_source"
+      ]
+    }
+  },
+  {
+    "package": "markrivet-core",
+    "target": [
+      "--lib"
+    ],
+    "phases": {
+      "1": [
+        "analytics::tests::analytics_walker_scope_and_injected_errors",
+        "analytics::tests::analytics_differential_extraction_and_presence_and"
+      ],
+      "2": [
+        "analytics::tests::analytics_numeric_typed_key_identity_and_sort"
+      ],
+      "3": [
+        "analytics::tests::analytics_failed_outcome_and_event_replay",
+        "analytics::bundle::tests::analytics_bundle_caps"
+      ]
+    }
+  },
+  {
+    "package": "markrivet-cli",
+    "target": [
+      "--test",
+      "concurrency"
+    ],
+    "phases": {
+      "3": [
+        "analytics_competing_exports_preserve_published_capture"
+      ]
+    }
+  }
+]

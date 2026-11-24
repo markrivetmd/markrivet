@@ -1,0 +1,12 @@
+.venv/
+node_modules/
+__pycache__/
+*.pyc
+.serena/
+/target/
+/.codex/worktrees/
+/.claude/worktrees/
+/.agents/
+benchmark/results/*-traces.json
+/markrivet-site/
+/markrivet/

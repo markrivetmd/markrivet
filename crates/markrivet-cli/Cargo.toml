@@ -1,0 +1,25 @@
+[package]
+name = "markrivet-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Guarded, concurrent edits to the Markdown files agents share: the markrivet command-line tool"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "markrivet"
+path = "src/main.rs"
+
+[dependencies]
+markrivet-core = { path = "../markrivet-core" }
+serde_json.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
+markstay.workspace = true
+base64 = "0.22"

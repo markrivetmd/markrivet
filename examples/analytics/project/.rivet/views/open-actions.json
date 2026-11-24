@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "query": {
+    "collection": "actions",
+    "analytics": "census",
+    "where": [
+      {
+        "field": "item.done",
+        "op": "eq",
+        "value": false
+      }
+    ],
+    "group_by": [
+      "document.cluster"
+    ],
+    "measures": {
+      "actions": {
+        "op": "count"
+      },
+      "trackers": {
+        "op": "count_distinct",
+        "field": "document.path"
+      }
+    }
+  }
+}

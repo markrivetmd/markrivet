@@ -1,0 +1,24 @@
+[workspace]
+members = ["crates/markrivet-core", "crates/markrivet-cli"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/markrivetmd/markrivet"
+homepage = "https://markrivet.dev"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
+comrak = { version = "=0.55.0", default-features = false }
+yaml-rust2 = { version = "=0.13.0", default-features = false }
+markstay = "=0.15.0"
+sha2 = "0.10"
+libc = "0.2"
+
+# Diagnostics are owned, serialisable and only built on refusal paths.
+[workspace.lints.clippy]
+result_large_err = "allow"

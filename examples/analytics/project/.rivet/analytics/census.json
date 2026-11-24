@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "collection": "actions",
+  "fields": {
+    "cluster": {
+      "type": "enum",
+      "key": [
+        "cluster"
+      ],
+      "values": [
+        "alpha",
+        "beta",
+        "unused"
+      ],
+      "required": true
+    },
+    "status": {
+      "type": "enum",
+      "key": [
+        "status"
+      ],
+      "values": [
+        "active",
+        "parked"
+      ],
+      "default": "active"
+    }
+  }
+}

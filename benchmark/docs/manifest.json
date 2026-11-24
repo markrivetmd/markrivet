@@ -1,0 +1,58 @@
+[
+  {
+    "doc_id": "doc_2k",
+    "target_tokens": 2000,
+    "actual_tokens": 2038,
+    "fixed_section_tokens": 782,
+    "worklog_tokens": 1256,
+    "worklog_entries": 13,
+    "table_rows": 5,
+    "frontmatter_tokens": 65,
+    "one_paragraph_tokens": 52,
+    "one_table_row_tokens": 9,
+    "one_worklog_entry_tokens": 36,
+    "one_section_heading_line_tokens": 3
+  },
+  {
+    "doc_id": "doc_10k",
+    "target_tokens": 10000,
+    "actual_tokens": 9958,
+    "fixed_section_tokens": 913,
+    "worklog_tokens": 9045,
+    "worklog_entries": 120,
+    "table_rows": 10,
+    "frontmatter_tokens": 64,
+    "one_paragraph_tokens": 52,
+    "one_table_row_tokens": 9,
+    "one_worklog_entry_tokens": 36,
+    "one_section_heading_line_tokens": 3
+  },
+  {
+    "doc_id": "doc_25k",
+    "target_tokens": 25000,
+    "actual_tokens": 24998,
+    "fixed_section_tokens": 1065,
+    "worklog_tokens": 23933,
+    "worklog_entries": 310,
+    "table_rows": 18,
+    "frontmatter_tokens": 65,
+    "one_paragraph_tokens": 52,
+    "one_table_row_tokens": 9,
+    "one_worklog_entry_tokens": 36,
+    "one_section_heading_line_tokens": 3
+  },
+  {
+    "doc_id": "doc_100k",
+    "target_tokens": 100000,
+    "actual_tokens": 99978,
+    "fixed_section_tokens": 1573,
+    "worklog_tokens": 98405,
+    "worklog_entries": 1261,
+    "table_rows": 40,
+    "frontmatter_tokens": 64,
+    "one_paragraph_tokens": 52,
+    "one_table_row_tokens": 9,
+    "one_worklog_entry_tokens": 36,
+    "one_section_heading_line_tokens": 3
+  }
+]

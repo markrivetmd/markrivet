@@ -1,0 +1,13 @@
+{
+  "id": "tracker-action",
+  "version": 1,
+  "item": "checkbox",
+  "fields": {
+    "done": {"type": "boolean", "from": "checkbox"},
+    "actor": {"type": "string", "from": "tag", "tags": ["agent", "human:*", "process:*"], "default": "human:owner"},
+    "title": {"type": "string", "from": "title"},
+    "date": {"type": "date", "from": "title_date"},
+    "context": {"type": "string", "from": "text"},
+    "gate": {"type": "string", "from": "label", "label": "Gate"}
+  }
+}

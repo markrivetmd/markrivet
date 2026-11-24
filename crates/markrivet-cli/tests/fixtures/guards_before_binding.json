@@ -1,0 +1,78 @@
+{
+  "baseline_commit": "1e2d78c15015c9297b536c28823a23a34e0d2f38",
+  "source": "---\nname: synthetic\n---\n# Synthetic\n<!-- stay:Head0001 hash=sha256:111111111111 -->\n\n## Work\n<!-- stay:Work0001 hash=sha256:111111111111 -->\n\n- [ ] **One.** Body. <!-- stay:Item0001 subhash=sha256:111111111111 -->\n- [x] **Two.** Keep. <!-- stay:Item0002 subhash=sha256:111111111111 -->\n<!-- stay:List0001 hash=sha256:111111111111 -->\n\n## Log\n\nSuffix.\n",
+  "config": {
+    "collections": {
+      "tasks": {
+        "schema": "task@1",
+        "files": [
+          "T.md"
+        ],
+        "section": "Work",
+        "level": 2
+      }
+    }
+  },
+  "schema": {
+    "id": "task",
+    "version": 1,
+    "item": "checkbox",
+    "fields": {
+      "title": {
+        "type": "string",
+        "from": "title",
+        "required": true
+      },
+      "done": {
+        "type": "boolean",
+        "from": "checkbox"
+      }
+    }
+  },
+  "native": [
+    {
+      "select": {
+        "kind": "document"
+      },
+      "revision": "rivet:v1:document:acd68c29ac45ad1d6f1284cb87987a74"
+    },
+    {
+      "select": {
+        "kind": "id",
+        "id": "Head0001"
+      },
+      "revision": "rivet:v1:section:07b19a83f90594690ba60ebff857d4bf"
+    },
+    {
+      "select": {
+        "kind": "id",
+        "id": "Work0001"
+      },
+      "revision": "rivet:v1:section:7a50c8333f21df1ce710369ff4b23ad9"
+    },
+    {
+      "select": {
+        "kind": "id",
+        "id": "List0001"
+      },
+      "revision": "rivet:v1:list:dbda985f8b83969114fb1d49ffe0b4ea"
+    },
+    {
+      "select": {
+        "kind": "id",
+        "id": "Item0001"
+      },
+      "revision": "rivet:v1:item:bbe23924c7f103ce50d3d59bbaf98527"
+    },
+    {
+      "select": {
+        "kind": "frontmatter_key",
+        "key": "name"
+      },
+      "revision": "rivet:v1:frontmatter:e84828e581c1c13d58ea0707e34258da"
+    }
+  ],
+  "typed_item": "rivet:v1:action:f64830e38828d4c937887406fd3c56ac",
+  "typed_collection": "rivet:v1:collection:e0247a4314e5360e18a5acba91267375",
+  "schema_bytes": "{\"id\": \"task\", \"version\": 1, \"item\": \"checkbox\", \"fields\": {\"title\": {\"type\": \"string\", \"from\": \"title\", \"required\": true}, \"done\": {\"type\": \"boolean\", \"from\": \"checkbox\"}}}"
+}

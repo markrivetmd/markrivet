@@ -1,0 +1,119 @@
+[
+  {
+    "name": "unicode CRLF BOM",
+    "source": "﻿## Héllo 😀\r\n\r\nnaïve 世界\r\n",
+    "blocks": [
+      {
+        "kind": "heading",
+        "text": "## Héllo 😀"
+      },
+      {
+        "kind": "paragraph",
+        "text": "naïve 世界"
+      }
+    ],
+    "block_count": 2
+  },
+  {
+    "name": "setext and adjacent blocks",
+    "source": "Héllo\n=====\n\nbody\n\n---\n\n## Next",
+    "blocks": [
+      {
+        "kind": "heading",
+        "text": "Héllo\n====="
+      },
+      {
+        "kind": "paragraph",
+        "text": "body"
+      },
+      {
+        "kind": "thematic_break",
+        "text": "---"
+      },
+      {
+        "kind": "heading",
+        "text": "## Next"
+      }
+    ],
+    "block_count": 4
+  },
+  {
+    "name": "fenced marker is code",
+    "source": "```md\n<!-- stay:fake -->\n# not heading\n```\n\n# real\n",
+    "blocks": [
+      {
+        "kind": "code_block",
+        "text": "```md\n<!-- stay:fake -->\n# not heading\n```"
+      },
+      {
+        "kind": "heading",
+        "text": "# real"
+      }
+    ],
+    "block_count": 2
+  },
+  {
+    "name": "multiline task and nested list",
+    "source": "- [ ] Act\n  context\n  - nested\n\n  gate\n\n- [x] Done",
+    "blocks": [
+      {
+        "kind": "taskitem",
+        "text": "- [ ] Act\n  context\n  - nested\n\n  gate"
+      },
+      {
+        "kind": "taskitem",
+        "text": "- [x] Done"
+      }
+    ],
+    "block_count": 9
+  },
+  {
+    "name": "tabs and quote",
+    "source": "#\tTitle\n\n> quoted\n> next\n\n\tindented\n",
+    "blocks": [
+      {
+        "kind": "heading",
+        "text": "#\tTitle"
+      },
+      {
+        "kind": "block_quote",
+        "text": "> quoted\n> next"
+      },
+      {
+        "kind": "code_block",
+        "text": "\tindented"
+      }
+    ],
+    "block_count": 4
+  },
+  {
+    "name": "GFM table escaped pipe code and empty cells",
+    "source": "| Name | Value |\n| --- | --- |\n| a\\|b | `c\\|d` |\n| x | |\n",
+    "blocks": [
+      {
+        "kind": "table",
+        "text": "| Name | Value |\n| --- | --- |\n| a\\|b | `c\\|d` |\n| x | |"
+      },
+      {
+        "kind": "table_row",
+        "text": "| a\\|b | `c\\|d` |"
+      }
+    ],
+    "block_count": 4
+  },
+  {
+    "name": "HTML and inline marker example",
+    "source": "<!-- ordinary -->\n\n`<!-- stay:fake -->`\n",
+    "blocks": [
+      {
+        "kind": "html_block",
+        "text": "<!-- ordinary -->"
+      },
+      {
+        "kind": "paragraph",
+        "text": "`<!-- stay:fake -->`"
+      }
+    ],
+    "block_count": 2
+  }
+]

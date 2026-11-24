@@ -1,0 +1,5 @@
+[env]
+# These tests spawn many Rivet/Git processes per worker. Bound independent
+# fixtures so host contention does not consume their Git and lock deadlines.
+# Each concurrency test still controls its own competing writer processes.
+RUST_TEST_THREADS = { value = "4", force = true }

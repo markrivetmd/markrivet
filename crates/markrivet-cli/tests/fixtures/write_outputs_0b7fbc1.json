@@ -1,0 +1,206 @@
+{
+  "file": "---\nstatus: active\nentity: widgets\nowner: owner\n---\n\n# Widgets\n<!-- stay:gHN81kMw hash=sha256:7a47bebe8068 -->\n\n> State for the widget rollout. The design lives elsewhere; this file keeps\n> the queue and the log.\n\n## Action\n<!-- stay:3PznC2DN hash=sha256:2261b4c779c1 -->\n\n- [x] **Ship the widget.** Compatible. <!-- stay:uXsvBQT0 subhash=sha256:145a6f9daa98 -->\n\n- [x] `agent` **Refresh the fixtures. (2026-09-03)** Regenerate from the\n      seeded corpus.\n      **Gate**: the fixture diff is empty. <!-- stay:FwvpUpW2 subhash=sha256:62b32f7bca5a -->\n\n- [ ] **Added** <!-- stay:4g1I6FqL subhash=sha256:22c6b1fa9ec2 -->\n<!-- stay:OczduVUV hash=sha256:ee7fd9b71f91 -->\n\n## Notes\n<!-- stay:Q6BsNG2s hash=sha256:63e13e87b378 -->\n\nBackground a session needs, not a queue. Nothing addresses these items, so a\ndefault stamp leaves them alone; `select: {\"kind\": \"document\"}` stamps them.\n\n- The rollout is gated on the migration note, not on the build. <!-- stay:a0XLZ6qp subhash=sha256:d832e71118d0 -->\n- `widget-cli release --to <channel>` is the only supported publish path. <!-- stay:siJkuh3c subhash=sha256:013cd4be0df7 -->\n<!-- stay:UejmzUmL hash=sha256:ed582f65d943 -->\n\n## Log\n<!-- stay:SYTQgDo0 hash=sha256:9c2666c69e87 -->\n\nNewest first, one entry per event.\n\n### 2026-09-05: compatible\n<!-- stay:LT823JEU hash=sha256:4618ee5a78de -->\n\nChecked.\n\n### 2026-09-03: fixtures drifted\n<!-- stay:dExp2TVH hash=sha256:d55499825d7d -->\n\nThe seeded corpus changed shape; the fixtures need regenerating.\n\n### 2026-08-28: pilot confirmed\n<!-- stay:vt8d8QRp hash=sha256:d59c4e292d93 -->\n\nSam confirmed the pilot customer.\n",
+  "outputs": [
+    [
+      0,
+      {
+        "durable": true,
+        "evidence_refreshed": 0,
+        "ok": true,
+        "ops": [
+          {
+            "minted": [
+              {
+                "id": "gHN81kMw",
+                "kind": "section",
+                "line": 7
+              },
+              {
+                "id": "3PznC2DN",
+                "kind": "section",
+                "line": 13
+              },
+              {
+                "id": "Q6BsNG2s",
+                "kind": "section",
+                "line": 28
+              },
+              {
+                "id": "SYTQgDo0",
+                "kind": "section",
+                "line": 37
+              },
+              {
+                "id": "dExp2TVH",
+                "kind": "section",
+                "line": 42
+              },
+              {
+                "id": "vt8d8QRp",
+                "kind": "section",
+                "line": 47
+              },
+              {
+                "id": "uXsvBQT0",
+                "kind": "item",
+                "line": 16
+              },
+              {
+                "id": "FwvpUpW2",
+                "kind": "item",
+                "line": 20
+              },
+              {
+                "id": "4g1I6FqL",
+                "kind": "item",
+                "line": 24
+              },
+              {
+                "id": "OczduVUV",
+                "kind": "list",
+                "line": 16
+              }
+            ]
+          }
+        ],
+        "path": "tracking/TRACKING_WIDGETS.md",
+        "revision": "rivet:v1:document:6837f155ce387c2b76ce5420ad6ca7a0",
+        "status": "applied"
+      }
+    ],
+    [
+      0,
+      {
+        "durable": true,
+        "evidence_refreshed": 2,
+        "ok": true,
+        "ops": [
+          {
+            "id": "uXsvBQT0",
+            "revision": "rivet:v1:item:476b22c395b3fe895d9dd4acf207e7b1"
+          }
+        ],
+        "path": "tracking/TRACKING_WIDGETS.md",
+        "revision": "rivet:v1:document:2ee6647d452cd59c3d3a46c00bd011b2",
+        "status": "applied"
+      }
+    ],
+    [
+      0,
+      {
+        "durable": true,
+        "evidence_refreshed": 2,
+        "ok": true,
+        "ops": [
+          {
+            "collection_revision": "rivet:v1:collection:a17b20b4e6e1c1fb9f8aff47b78a4cef",
+            "id": "FwvpUpW2",
+            "revision": "rivet:v1:action:9a0d000fc702f17f7325ae820c4fc8d4"
+          }
+        ],
+        "path": "tracking/TRACKING_WIDGETS.md",
+        "revision": "rivet:v1:document:1b68f9db55266a3606ede713ea99823c",
+        "status": "applied"
+      }
+    ],
+    [
+      0,
+      {
+        "durable": true,
+        "evidence_refreshed": 0,
+        "ok": true,
+        "ops": [
+          {
+            "id": "LT823JEU",
+            "minted": [
+              {
+                "id": "LT823JEU",
+                "kind": "section",
+                "line": 40
+              }
+            ],
+            "revision": "rivet:v1:section:1c718aa64ded13fed1f37a0d6d521eac"
+          }
+        ],
+        "path": "tracking/TRACKING_WIDGETS.md",
+        "revision": "rivet:v1:document:2dbd8c207975b0438094a0a3e0edbac7",
+        "status": "applied"
+      }
+    ],
+    [
+      0,
+      {
+        "durable": true,
+        "evidence_refreshed": 1,
+        "ok": true,
+        "ops": [
+          {
+            "dropped": [
+              "4g1I6FqL"
+            ]
+          }
+        ],
+        "path": "tracking/TRACKING_WIDGETS.md",
+        "revision": "rivet:v1:document:27e3adb8fc5c49923d5fd013eeb0874d",
+        "status": "applied"
+      }
+    ],
+    [
+      0,
+      {
+        "durable": true,
+        "evidence_refreshed": 1,
+        "ok": true,
+        "ops": [
+          {
+            "collection_revision": "rivet:v1:collection:9cc33b90f4aab22400e5a66035967f42",
+            "id": "4g1I6FqL",
+            "minted": [
+              {
+                "id": "4g1I6FqL",
+                "kind": "item",
+                "line": 22
+              }
+            ],
+            "revision": "rivet:v1:action:c23d4905d37b12e3c2890180f1b9015a"
+          }
+        ],
+        "path": "tracking/TRACKING_WIDGETS.md",
+        "revision": "rivet:v1:document:c8edee97c2d715ec77f8aadacfbf71fc",
+        "status": "applied"
+      }
+    ],
+    [
+      0,
+      {
+        "durable": true,
+        "evidence_refreshed": 0,
+        "ok": true,
+        "ops": [
+          {
+            "minted": [
+              {
+                "id": "a0XLZ6qp",
+                "kind": "item",
+                "line": 31
+              },
+              {
+                "id": "siJkuh3c",
+                "kind": "item",
+                "line": 32
+              },
+              {
+                "id": "UejmzUmL",
+                "kind": "list",
+                "line": 31
+              }
+            ]
+          }
+        ],
+        "path": "tracking/TRACKING_WIDGETS.md",
+        "revision": "rivet:v1:document:255b0f962792b8f07e4836f2c13c180d",
+        "status": "applied"
+      }
+    ]
+  ]
+}

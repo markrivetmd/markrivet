@@ -1,0 +1,44 @@
+name: ci
+# Actions minutes are a budget, and many commits touch only Markdown, so neither
+# trigger runs for a change confined to root Markdown. Root *.md matches the top
+# level only; docs/ and examples/ are read by tests and still run.
+on:
+  push:
+    branches: [master]
+    paths-ignore: [ "*.md" ]
+  pull_request:
+    paths-ignore: [ "*.md" ]
+  workflow_dispatch:
+
+# A newer push to the same PR or branch supersedes the run in flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to the toolchain the local gates and installs build with, so a new
+      # clippy lint arrives with a deliberate bump instead of reddening master unread.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Debug profile: the concurrency tests rely on debug-only pause and fault hooks.
+      # jq and python3 on the runner let the walkthrough and trials tests run.
+      - run: cargo test --workspace
+
+  benchmark-generator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r benchmark/requirements.txt
+      - run: python benchmark/harness/test_generator.py
