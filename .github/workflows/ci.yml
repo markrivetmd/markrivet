@@ -32,6 +32,32 @@ jobs:
       # Debug profile: the concurrency tests rely on debug-only pause and fault hooks.
       # jq and python3 on the runner let the walkthrough and trials tests run.
       - run: cargo test --workspace
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Scripted models and a network guard keep this harness check offline.
+      - name: Offline pilot harness
+        run: RIVET=target/debug/markrivet python3 benchmark/pilot/test_pilot.py
+
+  release-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release
+      - name: Documented walkthrough with the release binary
+        run: RIVET=target/release/markrivet bash examples/tracker/walkthrough.sh
+      - name: Release reads, guarded writes and stale-guard refusal
+        shell: bash
+        run: |
+          smoke_test=tracker_walkthrough_through_the_cli
+          smoke=(cargo test --locked --release -p markrivet-cli --test cli "$smoke_test" -- --exact)
+          # A missing or renamed test must fail rather than pass with zero tests.
+          "${smoke[@]}" --list | grep -Fx "$smoke_test: test"
+          "${smoke[@]}"
 
   benchmark-generator:
     runs-on: ubuntu-latest
