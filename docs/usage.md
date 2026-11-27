@@ -30,8 +30,7 @@ Install from `github.com/markrivetmd/markrivet` with Cargo:
 cargo install --locked --git https://github.com/markrivetmd/markrivet markrivet-cli
 ```
 
-That repository is not public yet, and the crates are not on crates.io.
-From a checkout:
+The crates are not on crates.io yet. From a checkout:
 
 ```sh
 cargo install --path crates/markrivet-cli   # installs the `markrivet` binary

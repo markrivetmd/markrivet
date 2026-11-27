@@ -109,8 +109,8 @@ Install from `github.com/markrivetmd/markrivet` with Cargo:
 cargo install --locked --git https://github.com/markrivetmd/markrivet markrivet-cli
 ```
 
-That repository is not public yet, and the crates are not on crates.io; until
-then, build from a checkout as below.
+The crates are not on crates.io yet. To build from a checkout instead, see
+below.
 
 ## Quickstart
 
