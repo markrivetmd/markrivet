@@ -1,0 +1,366 @@
+name: release
+# Builds, tests and publishes the Linux release binaries.
+#
+# A pushed tag vX.Y.Z is the release path: every job runs, and `publish` creates
+# the GitHub release with the workflow's own token, as github-actions[bot]. The
+# tag must be annotated, made by the markrivet persona, name the commit it was
+# pushed with, match the workspace version and sit on master; `verify` checks
+# each before anything is built.
+#
+# Every other trigger is a dry run that exercises every job but `publish`: a push
+# to master or a pull request that changes this file or tools/release-archive.sh
+# (path filters are not evaluated for tag pushes, so tags always run), and
+# workflow_dispatch from the browser. A dry run never publishes, even when
+# dispatched on a tag ref: `verify` sets release=true only for a tag push.
+#
+# The release build runs in an ubuntu:22.04 container, not on the runner. The
+# loader checks a binary's glibc version needs, and a build on the runner's
+# glibc 2.39 needs GLIBC_2.39, which Debian 12 and RHEL 9 refuse to load. Built
+# against glibc 2.35 the binary needs at most GLIBC_2.34; release-archive.sh
+# refuses one that needs more, and `floor` runs it on almalinux:9 (glibc 2.34).
+# `test` runs the suite natively on both architectures, outside a container, as
+# a non-root user in the debug profile the concurrency tests need.
+#
+# Actions are pinned to commit ids and images to digests. No cache is restored:
+# a release build reads nothing another ref wrote. Event values reach scripts
+# only through the environment.
+on:
+  push:
+    tags: ["v*"]
+    branches: [master]
+    paths: [.github/workflows/release.yml, tools/release-archive.sh]
+  pull_request:
+    paths: [.github/workflows/release.yml, tools/release-archive.sh]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.identity.outputs.commit }}
+      version: ${{ steps.identity.outputs.version }}
+      release: ${{ steps.identity.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.98.1
+      - name: Release identity
+        id: identity
+        run: |
+          persona='markrivet <362135929+markrivet@users.noreply.github.com>'
+          fail() { echo "::error::$*"; exit 1; }
+          echo "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          commit=$(git rev-parse --verify 'HEAD^{commit}')
+          echo "COMMIT=$commit"
+          version=$(cargo metadata --no-deps --format-version 1 --locked |
+            jq -r '[.packages[] | select(.name == "markrivet-cli") | .version] |
+              if length == 1 then .[0] else error("expected one markrivet-cli package") end')
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "workspace version '$version' is not X.Y.Z"
+          echo "VERSION=$version"
+          release=false
+          if [ "$GITHUB_EVENT_NAME" = push ] && [[ $GITHUB_REF == refs/tags/v* ]]; then
+            tag=$GITHUB_REF_NAME
+            [ "$GITHUB_REF" = "refs/tags/$tag" ] || fail "ref $GITHUB_REF is not refs/tags/$tag"
+            [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "tag '$tag' is not vX.Y.Z"
+            # The tag object as the remote holds it, whatever the checkout fetched.
+            git fetch --no-tags origin "+$GITHUB_REF:$GITHUB_REF"
+            [ "$(git cat-file -t "$GITHUB_REF")" = tag ] || fail "$tag is not an annotated tag"
+            [ "$(git for-each-ref --format='%(tag)' "$GITHUB_REF")" = "$tag" ] ||
+              fail "the tag object's own name is not $tag"
+            tagger=$(git for-each-ref --format='%(taggername) %(taggeremail)' "$GITHUB_REF")
+            [ "$tagger" = "$persona" ] || fail "$tag was tagged by '$tagger', not $persona"
+            target=$(git rev-parse --verify "$GITHUB_REF^{commit}")
+            [ "$target" = "$commit" ] || fail "$tag names $target, but the checkout is $commit"
+            [ "v$version" = "$tag" ] || fail "$tag does not match the workspace version $version"
+            git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master
+            git merge-base --is-ancestor "$commit" refs/remotes/origin/master ||
+              fail "$commit is not on master"
+            release=true
+          fi
+          echo "RELEASE=$release"
+          {
+            echo "commit=$commit"
+            echo "version=$version"
+            echo "release=$release"
+          } >>"$GITHUB_OUTPUT"
+
+  test:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    env:
+      COMMIT: ${{ needs.verify.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Checkout is the verified commit
+        run: '[ "$(git rev-parse --verify "HEAD^{commit}")" = "$COMMIT" ]'
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.98.1
+      # Debug profile: the concurrency tests rely on debug-only pause and fault hooks.
+      - run: cargo test --workspace --locked
+      - run: cargo build --locked --release
+      - name: Documented walkthrough with the release binary
+        run: RIVET=target/release/markrivet bash examples/tracker/walkthrough.sh
+      - name: Release reads, guarded writes and stale-guard refusal
+        run: |
+          smoke_test=tracker_walkthrough_through_the_cli
+          smoke=(cargo test --locked --release -p markrivet-cli --test cli "$smoke_test" -- --exact)
+          # A missing or renamed test must fail rather than pass with zero tests.
+          "${smoke[@]}" --list | grep -Fx "$smoke_test: test"
+          "${smoke[@]}"
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            rustup_init_sha256: b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            rustup_init_sha256: 9f608c142e0e38a78957d0661ba1dfaf0b6fb37184cfaa4b9a0aa57af6184282
+    runs-on: ${{ matrix.os }}
+    container: ubuntu:22.04@sha256:b000e69a50ff940390233025e7a337fb8469b509e2334fa4d018ac30f3e18cdb
+    permissions:
+      contents: read
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      COMMIT: ${{ needs.verify.outputs.commit }}
+      RUSTUP_VERSION: 1.29.3
+      RUSTUP_INIT_SHA256: ${{ matrix.rustup_init_sha256 }}
+    steps:
+      # git before checkout, so the checkout is a repository build.rs can read.
+      - name: Build tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends curl ca-certificates gcc libc6-dev git binutils file
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust 1.98.1
+        run: |
+          init=$RUNNER_TEMP/rustup-init
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 -o "$init" \
+            "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/$TARGET/rustup-init"
+          echo "$RUSTUP_INIT_SHA256  $init" | sha256sum -c -
+          chmod +x "$init"
+          "$init" -y --no-modify-path --profile minimal --default-toolchain 1.98.1
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+      # The container runs as root over a checkout the runner user owns; without
+      # this git refuses it and build.rs records the commit as unknown.
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: cargo build --locked --release -p markrivet-cli --bin markrivet
+      - run: bash tools/release-archive.sh "$TARGET" "$VERSION" "$COMMIT" dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: markrivet-${{ matrix.target }}
+          path: dist/markrivet-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  floor:
+    needs: [verify, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    container: almalinux:9@sha256:02df05719ef287ebd0df0a1eedb9172a00bd70703aed7b25660e426b8e0d6047
+    permissions:
+      contents: read
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      COMMIT: ${{ needs.verify.outputs.commit }}
+    steps:
+      - run: dnf install -y --setopt=install_weak_deps=False git jq
+      # The checkout carries the example the walkthrough runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Checkout is the verified commit
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          [ "$(git rev-parse --verify "HEAD^{commit}")" = "$COMMIT" ]
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: markrivet-${{ matrix.target }}
+          path: dist
+      - name: The release binary on glibc 2.34
+        run: |
+          getconf GNU_LIBC_VERSION
+          tar -xzf "dist/markrivet-$TARGET.tar.gz" -C "$RUNNER_TEMP"
+          bin=$RUNNER_TEMP/markrivet-$TARGET/markrivet
+          got=$("$bin" --version)
+          echo "$got"
+          [ "$got" = "markrivet $VERSION $COMMIT" ] ||
+            { echo "::error::the binary prints '$got', not 'markrivet $VERSION $COMMIT'"; exit 1; }
+          RIVET=$bin bash examples/tracker/walkthrough.sh
+
+  assemble:
+    needs: [verify, test, floor]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: markrivet-*-linux-gnu
+          merge-multiple: true
+          path: dist
+      - name: Digests
+        working-directory: dist
+        run: |
+          expected=$'markrivet-aarch64-unknown-linux-gnu.tar.gz\nmarkrivet-x86_64-unknown-linux-gnu.tar.gz'
+          got=$(LC_ALL=C ls -A)
+          [ "$got" = "$expected" ] || { echo "::error::dist holds: $(echo "$got" | paste -sd' ')"; exit 1; }
+          sha256sum markrivet-*.tar.gz >SHA256SUMS
+          sha256sum -c SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: [verify, assemble]
+    if: needs.verify.outputs.release == 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      # No checkout here, so every gh call names the repository through GH_REPO.
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      COMMIT: ${{ needs.verify.outputs.commit }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-dist
+          path: dist
+      - name: Release files and the remote tag
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          tag=$GITHUB_REF_NAME
+          [ "v$VERSION" = "$tag" ] || fail "tag $tag is not v$VERSION"
+          expected=$'SHA256SUMS\nmarkrivet-aarch64-unknown-linux-gnu.tar.gz\nmarkrivet-x86_64-unknown-linux-gnu.tar.gz'
+          [ "$(cd dist && LC_ALL=C ls -A)" = "$expected" ] || fail "release-dist does not hold exactly the three files"
+          (cd dist && sha256sum -c SHA256SUMS)
+          # The tag on the remote is still the annotated tag of the verified commit.
+          read -r kind obj < <(gh api "repos/$GH_REPO/git/ref/tags/$tag" --jq '.object.type + " " + .object.sha')
+          [ "$kind" = tag ] || fail "the remote $tag is a $kind, not an annotated tag"
+          read -r kind target < <(gh api "repos/$GH_REPO/git/tags/$obj" --jq '.object.type + " " + .object.sha')
+          { [ "$kind" = commit ] && [ "$target" = "$COMMIT" ]; } || fail "the remote $tag names $kind $target, not commit $COMMIT"
+      - name: Existing releases for the tag
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          tag=$GITHUB_REF_NAME
+          # A published release is never replaced: stop before changing anything.
+          if gh api "repos/$GH_REPO/releases/tags/$tag" --jq .html_url >"$RUNNER_TEMP/published" 2>"$RUNNER_TEMP/err"; then
+            fail "$tag is already released: $(cat "$RUNNER_TEMP/published")"
+          fi
+          grep -q 'HTTP 404' "$RUNNER_TEMP/err" || { cat "$RUNNER_TEMP/err"; fail "cannot read the release for $tag"; }
+          export TAG=$tag
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+            --jq '.[] | select(.tag_name == env.TAG) | "\(.id) \(.draft)"' >"$RUNNER_TEMP/existing"
+          if grep -q ' false$' "$RUNNER_TEMP/existing"; then fail "$tag already has a published release"; fi
+          # A draft is what an earlier run left behind. Drafts create no tag, and
+          # deleting one leaves the tag in place.
+          while read -r id _; do
+            echo "deleting the draft release $id left for $tag"
+            gh api -X DELETE "repos/$GH_REPO/releases/$id" </dev/null
+          done <"$RUNNER_TEMP/existing"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/markrivet-*.tar.gz
+      - name: Draft, check, publish
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          tag=$GITHUB_REF_NAME
+          notes=$RUNNER_TEMP/notes.md
+          cat >"$notes" <<'EOF'
+          markrivet @VERSION@, built from commit @COMMIT@.
+
+          Linux binaries for x86_64 and aarch64, for glibc 2.34 or later (Ubuntu 22.04,
+          Debian 12, RHEL 9 and their successors). Musl-based distributions such as
+          Alpine are not supported yet. The release workflow ran the test suite on both
+          architectures, and ran each binary below through the documented walkthrough on
+          glibc 2.34 on its own architecture.
+
+          Download, check the digest and run (for aarch64, swap the name):
+
+              set -e
+              asset=markrivet-x86_64-unknown-linux-gnu.tar.gz
+              base=https://github.com/markrivetmd/markrivet/releases/download/@TAG@
+              curl -fLO "$base/$asset"
+              curl -fLO "$base/SHA256SUMS"
+              sha256sum -c --ignore-missing SHA256SUMS
+              tar -xzf "$asset"
+              markrivet-x86_64-unknown-linux-gnu/markrivet --version
+
+          Check the build provenance:
+
+              gh attestation verify markrivet-x86_64-unknown-linux-gnu.tar.gz -R markrivetmd/markrivet
+          EOF
+          sed -i -e "s/@VERSION@/$VERSION/g" -e "s/@COMMIT@/$COMMIT/g" -e "s/@TAG@/$tag/g" "$notes"
+          gh release create "$tag" --verify-tag --draft --title "markrivet $VERSION" --notes-file "$notes" \
+            dist/markrivet-x86_64-unknown-linux-gnu.tar.gz dist/markrivet-aarch64-unknown-linux-gnu.tar.gz dist/SHA256SUMS
+          export TAG=$tag
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+            --jq '.[] | select(.tag_name == env.TAG) | "\(.id) \(.draft)"' >"$RUNNER_TEMP/after"
+          { [ "$(grep -c . "$RUNNER_TEMP/after")" = 1 ] && grep -q ' true$' "$RUNNER_TEMP/after"; } ||
+            fail "expected one draft for $tag, found: $(paste -sd' ' "$RUNNER_TEMP/after")"
+          read -r id _ <"$RUNNER_TEMP/after"
+          # The draft holds exactly the three files, each byte-identical to the local one.
+          gh api "repos/$GH_REPO/releases/$id" --jq '.assets[] | "\(.name) \(.size) \(.state) \(.id)"' |
+            LC_ALL=C sort >"$RUNNER_TEMP/assets"
+          cat "$RUNNER_TEMP/assets"
+          want=$(cd dist && for f in SHA256SUMS markrivet-aarch64-unknown-linux-gnu.tar.gz markrivet-x86_64-unknown-linux-gnu.tar.gz; do
+            echo "$f $(stat -c %s "$f") uploaded"; done)
+          [ "$(cut -d' ' -f1-3 "$RUNNER_TEMP/assets")" = "$want" ] || fail "the draft's assets differ from dist"
+          while read -r name _ _ asset; do
+            gh api -H 'Accept: application/octet-stream' "repos/$GH_REPO/releases/assets/$asset" \
+              </dev/null >"$RUNNER_TEMP/asset"
+            cmp "$RUNNER_TEMP/asset" "dist/$name" || fail "the draft's $name differs from dist/$name"
+          done <"$RUNNER_TEMP/assets"
+          gh api -X PATCH "repos/$GH_REPO/releases/$id" -F draft=false -f make_latest=true --jq .html_url
+          state=$(gh api "repos/$GH_REPO/releases/tags/$tag" --jq '"\(.id) \(.draft)"')
+          [ "$state" = "$id false" ] || fail "after publishing, the release for $tag reads '$state'"
