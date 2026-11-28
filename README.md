@@ -104,6 +104,11 @@ write prerequisites without changing project bytes.
 - **A queue nobody reads as prose.** A task queue that agents churn through,
   with little reasoning beside each item, fits an agent issue tracker such
   as Beads better than a file people open.
+- **A personal knowledge base.** Notes you search by meaning and follow
+  through their links, served to agents over MCP: [Basic
+  Memory](https://github.com/basicmachines-co/basic-memory) fits better. It
+  edits a note's sections by heading and, when asked, refuses an edit if the
+  note changed since it was read.
 - **High write rates or big data.** Thousands of records, or writes every
   second: use a database. Rivet is sized for files people still read.
 
