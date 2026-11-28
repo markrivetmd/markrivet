@@ -153,15 +153,25 @@ fn legal(
     writable_scalar(doc, k).map(|_| ())
 }
 
-/// The value a field holds now, before defaults: `Null` when absent.
-fn current(doc: &Document, spec: &FieldSpec) -> Value {
+/// The value a field's source holds now, before defaults: `None` when its
+/// key (or mapping field) is absent, `Some(Null)` when present but empty or
+/// `null`.
+fn stored(doc: &Document, spec: &FieldSpec) -> Option<Value> {
     let key = spec.key.as_deref().expect("a file schema reads keys");
-    let Some(s) = doc.scalars().iter().find(|s| s.key == key) else {
-        return Value::Null;
-    };
+    let s = doc.scalars().iter().find(|s| s.key == key)?;
     match spec.field.as_deref() {
-        None => s.value.clone(),
-        Some(field) => s.value.get(field).cloned().unwrap_or(Value::Null),
+        None => Some(s.value.clone()),
+        Some(field) => s.value.get(field).cloned(),
+    }
+}
+
+/// A requested value is current, so no edit: `null` only when the key is
+/// absent (a present `key:` or `key: null` is removed), any other value when
+/// it equals the stored one.
+fn current(doc: &Document, spec: &FieldSpec, value: &Value) -> bool {
+    match (stored(doc, spec), value) {
+        (stored, Value::Null) => stored.is_none(),
+        (stored, value) => stored.as_ref() == Some(value),
     }
 }
 
@@ -179,7 +189,7 @@ pub(crate) fn record_edits(
     let payload = doc.frontmatter.payload.expect("checked by record_scalars");
     let mut by_key: BTreeMap<&str, Vec<&Want>> = BTreeMap::new();
     for want in &wants {
-        if *want.value != current(doc, want.spec) {
+        if !current(doc, want.spec, want.value) {
             let key = want.spec.key.as_deref().expect("a file schema reads keys");
             by_key.entry(key).or_default().push(want);
         }

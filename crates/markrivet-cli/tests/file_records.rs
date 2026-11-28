@@ -1258,6 +1258,18 @@ fn record_writes_compose_their_key_edits_exactly() {
             json!({"generated_by": "kim", "generated_at": "2026-12-01T00:00:00Z", "owner": null}),
             Some("---\ngenerated:\n  by: kim\n  at: 2026-12-01T00:00:00Z\n---\n# A\n"),
         ),
+        // `null` removes a key that is present but empty or `null`; on an
+        // absent key it is no edit.
+        (
+            "---\nowner:\ndue: null\nstatus: done\n---\n# A\n",
+            json!({"owner": null, "due": null}),
+            Some("---\nstatus: done\n---\n# A\n"),
+        ),
+        (
+            "---\nstatus: done\n---\n# A\n",
+            json!({"owner": null, "due": null}),
+            Some("---\nstatus: done\n---\n# A\n"),
+        ),
     ];
     for (n, (text, set, want)) in cases.into_iter().enumerate() {
         let path = format!("notes/n{n}.md");
@@ -1433,9 +1445,20 @@ fn every_record_write_refusal_leaves_the_file_byte_identical() {
             json!({"owner": "sam"}),
             "unsupported_syntax",
         ),
-        // Removing the only key would turn the fences into Markdown.
+        // Removing the only key would turn the fences into Markdown, an
+        // empty or `null` one included.
         (
             "---\nowner: sam\n---\n# A\n",
+            json!({"owner": null}),
+            "unsupported_syntax",
+        ),
+        (
+            "---\nowner:\n---\n# A\n",
+            json!({"owner": null}),
+            "unsupported_syntax",
+        ),
+        (
+            "---\nowner: null\n---\n# A\n",
             json!({"owner": null}),
             "unsupported_syntax",
         ),

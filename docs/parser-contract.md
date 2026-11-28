@@ -345,7 +345,8 @@ and shape checks the native key ops use (`scalar_token`, `mapping_field_token`,
 lines, sibling mapping fields composed on their key's lines and re-read as one
 mapping, and added keys merged into one insertion at the payload end by key
 name, coalesced with a removal ending or starting there. A field whose stored
-value equals the request is left alone, so a request of current values has no
+value equals the request is left alone (`null` equals only an absent key, so a
+present empty or `null` key is removed), so a request of current values has no
 splice. The candidate payload is read back before planning returns.
 `Expectation::Record` carries the request (binding, path, `set`) and the
 expected fields, and re-derives the splices at every stage: `allowed` returns

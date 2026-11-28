@@ -1999,7 +1999,8 @@ with native key writes); each field's form, by the table, whatever the value;
 each value's type (`invalid_item`, which `null` on a required field also is).
 Then a request whose values all equal the stored ones writes nothing and
 answers `unchanged`. A stored value is compared before defaults, so setting an
-absent key to its default adds the key; an unwritable form or a stale guard
+absent key to its default adds the key, and `null` equals only an absent key:
+a present `key:` or `key: null` is removed. An unwritable form or a stale guard
 refuses even when every value is current. The written frontmatter must read
 back as the preimage's with exactly the planned edits and the record must
 re-read as asked, or nothing is written.
