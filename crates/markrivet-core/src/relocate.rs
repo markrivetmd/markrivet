@@ -1029,11 +1029,13 @@ impl MoveReceipt {
         }
         let state = move_config(project, &config, &self.source.path, &self.destination.path)
             .map_err(|e| ("config_changed", e.detail()))?;
-        // The digest covers raw globs, so an exclusion added since the move
-        // was planned is caught here rather than by it.
+        // The digest covers the raw live globs but not `exclude_files`, so an
+        // exclusion added since the move was planned is caught here: a path
+        // those globs still match that no binding selects any more.
+        let live = config.live_patterns();
         if [&self.source.path, &self.destination.path]
             .iter()
-            .any(|p| !config.live_member(p))
+            .any(|p| crate::schema::matches_file_patterns(&live, p) && !config.live_member(p))
         {
             return Err((
                 "config_changed",
