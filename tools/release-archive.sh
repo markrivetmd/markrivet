@@ -16,10 +16,11 @@
 #     "-dirty", not "unknown", not another commit.
 #
 # It then writes OUTDIR/markrivet-TARGET.tar.gz holding markrivet-TARGET/ with
-# markrivet, LICENSE and README.md. Owners, modes, order and the mtime (the
-# commit's) are fixed and gzip stores no name or time, so the archive's bytes
-# depend only on the binary and the commit. The archive is read back and must
-# hold exactly those four entries, the binary byte-identical and executable.
+# markrivet, plus LICENSE and README.md as COMMIT holds them. Owners, modes,
+# order and the mtime (the commit's) are fixed and gzip stores no name or time,
+# so the archive's bytes depend only on the binary and the commit. The archive
+# is read back and must hold exactly those four entries, the binary
+# byte-identical and executable.
 set -euo pipefail
 export LC_ALL=C
 umask 022
@@ -90,7 +91,10 @@ trap 'rm -rf "$stage"' EXIT
 mkdir "$stage/$name"
 chmod 0755 "$stage/$name"
 cp "$bin" "$stage/$name/markrivet"
-cp "$root/LICENSE" "$root/README.md" "$stage/$name/"
+# From COMMIT, not the working tree, so local edits cannot reach the archive.
+for doc in LICENSE README.md; do
+  git -C "$root" show "$commit:$doc" >"$stage/$name/$doc" || die "cannot read $doc at $commit"
+done
 chmod 0755 "$stage/$name/markrivet"
 chmod 0644 "$stage/$name/LICENSE" "$stage/$name/README.md"
 
