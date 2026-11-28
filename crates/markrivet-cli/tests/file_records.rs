@@ -1595,3 +1595,405 @@ fn the_documented_record_write_lands() {
             )
     );
 }
+
+// Entries appends: `append` adds one flat mapping to an `entries` field in
+// the same change as `set`.
+
+fn record_write(root: &Path, path: &str, set: Value, append: Value) -> (i32, Value) {
+    let guard = record_guard(root, path, "concepts");
+    rivet(
+        root,
+        "update-item",
+        json!({"path": path, "collection": "concepts", "guard": guard, "set": set,
+               "append": append}),
+    )
+}
+
+fn appended(root: &Path, path: &str, set: Value, append: Value) -> Value {
+    let (code, out) = record_write(root, path, set, append);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(out["status"], "applied", "{out}");
+    out
+}
+
+const ENTRY: &str = "{by: \"human:kim\", at: 2026-12-01T00:00:00Z}";
+
+/// Into a flow and a block `verified` and onto an absent key, each beside a
+/// `set`: exact bytes, the body byte-exact and every stay still attached.
+#[test]
+fn an_append_lands_in_each_form_beside_a_set() {
+    let root = records("file-records-append-forms");
+    let flow = "bundle/flow.md";
+    put(
+        &root,
+        flow,
+        "---\ntype: Metric\nverified: [{by: agent, at: 2026-10-01T00:00:00Z}] # v\nstatus: draft\n---\n# Flow\n\n- [ ] one\n- [ ] two\n",
+    );
+    let entry = json!({"by": "human:kim", "at": "2026-12-01T00:00:00Z"});
+    let cases = [
+        (
+            flow,
+            json!({"status": "current"}),
+            "---\ntype: Metric\nverified: [{by: agent, at: 2026-10-01T00:00:00Z}, {by: human:kim, at: 2026-12-01T00:00:00Z}] # v\nstatus: current\n---\n# Flow\n\n- [ ] one\n- [ ] two\n".to_string(),
+        ),
+        (
+            MARGIN,
+            json!({"stale_after": "2027-06-30T00:00:00Z"}),
+            MARGIN_TEXT
+                .replace("2026-12-31T00:00:00Z", "2027-06-30T00:00:00Z")
+                .replace(
+                    "10:00:00Z}\n---",
+                    &format!("10:00:00Z}}\n  - {ENTRY}\n---"),
+                ),
+        ),
+        // Absent: added among the new keys, by key name.
+        (
+            AOV,
+            json!({"stale_after": "2027-01-01T00:00:00Z", "pinned": true}),
+            "---\ntype: Metric\nstatus: retired\npinned: true\nstale_after: 2027-01-01T00:00:00Z\nverified: [{at: 2026-12-01T00:00:00Z, by: human:kim}]\n---\n# Average order value\n".to_string(),
+        ),
+    ];
+    for (path, set, want) in cases {
+        let (_, map) = rivet(&root, "map", json!({"path": path}));
+        let (code, out) = rivet(
+            &root,
+            "stamp",
+            json!({"path": path, "select": {"kind": "document"}, "guard": map["revision"]}),
+        );
+        assert_eq!(code, 0, "{out}");
+        let before = read(&root, path);
+        let ids = stays(&root, path);
+        assert!(!ids.is_empty(), "{path}");
+        let want = {
+            // The stamp's markers sit in the body; the frontmatter is as
+            // written above.
+            let body = |s: &str| s[s.find("\n---\n").unwrap()..].to_string();
+            let head = |s: &str| s[..s.find("\n---\n").unwrap()].to_string();
+            format!("{}{}", head(&want), body(&before))
+        };
+        let out = appended(&root, path, set, json!({"verified": entry}));
+        let after = read(&root, path);
+        assert_eq!(after, want, "{path}");
+        // An appended line moves the body down; nothing else may change.
+        let unlined = |v: Vec<Value>| -> Vec<Value> {
+            v.into_iter()
+                .map(|mut g| {
+                    let t = g["target"].as_object_mut().unwrap();
+                    t.remove("line");
+                    t.remove("end_line");
+                    g
+                })
+                .collect()
+        };
+        assert_eq!(
+            unlined(stays(&root, path)),
+            unlined(ids),
+            "{path}: every stay keeps its attachment"
+        );
+        assert_eq!(
+            out["ops"][0]["revision"],
+            record_guard(&root, path, "concepts"),
+            "{out}"
+        );
+        let read = query(&root, json!({"collection": "concepts", "paths": [path]}));
+        let verified = read["items"][0]["fields"]["verified"].as_array().unwrap();
+        assert_eq!(verified.last(), Some(&entry), "{read}");
+    }
+}
+
+/// An append to a block `verified` that is the last key, beside a key the
+/// same request adds: the entry under `verified`, the new key after it,
+/// after any trailing comments.
+#[test]
+fn adding_a_key_while_appending_puts_the_entry_first() {
+    let root = records("file-records-append-add");
+    for (n, (text, want)) in [
+        (
+            "---\ntype: Metric\nverified:\n  - by: agent\n    at: 2026-10-01T00:00:00Z\n---\n# A\n",
+            "---\ntype: Metric\nverified:\n  - by: agent\n    at: 2026-10-01T00:00:00Z\n  - by: human:kim\n    at: 2026-12-01T00:00:00Z\nstatus: draft\n---\n# A\n",
+        ),
+        (
+            "---\ntype: Metric\nverified:\n  - by: agent\n    at: 2026-10-01T00:00:00Z\n# trailing\n# comments\n---\n# A\n",
+            "---\ntype: Metric\nverified:\n  - by: agent\n    at: 2026-10-01T00:00:00Z\n  - by: human:kim\n    at: 2026-12-01T00:00:00Z\n# trailing\n# comments\nstatus: draft\n---\n# A\n",
+        ),
+        (
+            "---\r\ntype: Metric\r\nverified:\r\n- {by: agent, at: 2026-10-01T00:00:00Z}\r\n---\r\n# A",
+            "---\r\ntype: Metric\r\nverified:\r\n- {by: agent, at: 2026-10-01T00:00:00Z}\r\n- {by: human:kim, at: 2026-12-01T00:00:00Z}\r\nstatus: draft\r\n---\r\n# A",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = format!("bundle/add{n}.md");
+        put(&root, &path, text);
+        appended(
+            &root,
+            &path,
+            json!({"status": "draft"}),
+            json!({"verified": {"by": "human:kim", "at": "2026-12-01T00:00:00Z"}}),
+        );
+        assert_eq!(read(&root, &path), want, "{text:?}");
+    }
+}
+
+/// Removing the key that follows a block sequence while appending to it:
+/// the entry lands where the removed lines were, standalone comments stay,
+/// and keys the same request adds still go in at the end.
+#[test]
+fn deleting_the_key_after_a_block_sequence_while_appending_to_it() {
+    let root = records("file-records-append-remove");
+    let entry = json!({"verified": {"by": "human:kim", "at": "2026-12-01T00:00:00Z"}});
+    for (n, (text, set, want)) in [
+        (
+            "---\ntype: Metric\nverified:\n  - {by: agent, at: 2026-10-01T00:00:00Z}\nrank: 1\n# kept\nstatus: draft\n---\n# A\n",
+            json!({"rank": null}),
+            "---\ntype: Metric\nverified:\n  - {by: agent, at: 2026-10-01T00:00:00Z}\n  - {by: human:kim, at: 2026-12-01T00:00:00Z}\n# kept\nstatus: draft\n---\n# A\n",
+        ),
+        // The removed key is the last: the entry, then the added keys.
+        (
+            "---\ntype: Metric\nverified:\n  - {by: agent, at: 2026-10-01T00:00:00Z}\nrank: 1\n---\n# A\n",
+            json!({"rank": null, "status": "draft", "pinned": false}),
+            "---\ntype: Metric\nverified:\n  - {by: agent, at: 2026-10-01T00:00:00Z}\n  - {by: human:kim, at: 2026-12-01T00:00:00Z}\npinned: false\nstatus: draft\n---\n# A\n",
+        ),
+        // ... with comments of its own after it, which stay.
+        (
+            "---\ntype: Metric\nverified:\n  - {by: agent, at: 2026-10-01T00:00:00Z}\nrank: 1 # r\n# trailing\n---\n# A\n",
+            json!({"rank": null, "status": "draft"}),
+            "---\ntype: Metric\nverified:\n  - {by: agent, at: 2026-10-01T00:00:00Z}\n  - {by: human:kim, at: 2026-12-01T00:00:00Z}\n# trailing\nstatus: draft\n---\n# A\n",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = format!("bundle/rm{n}.md");
+        put(&root, &path, text);
+        appended(&root, &path, set.clone(), entry.clone());
+        assert_eq!(read(&root, &path), want, "{set}");
+    }
+}
+
+/// Every refusal an append can meet leaves the project byte-identical:
+/// `append_key_item`'s own, the record's request shape, and the shapes a
+/// record write never rewrites.
+#[test]
+fn every_append_refusal_leaves_the_project_byte_identical() {
+    let root = records("file-records-append-refusals");
+    let good = json!({"by": "human:kim", "at": "2026-12-01T00:00:00Z"});
+    let g = record_guard(&root, MARGIN, "concepts");
+    let request = |set: Value, append: Value| {
+        json!({"path": MARGIN, "collection": "concepts", "guard": g, "set": set,
+               "append": append})
+    };
+    for (set, append, code, says) in [
+        // The request's shape.
+        (
+            json!({}),
+            json!({"nope": good}),
+            "invalid_request",
+            "nope is not a field",
+        ),
+        (
+            json!({}),
+            json!({"tags": good}),
+            "invalid_request",
+            "does not hold entries",
+        ),
+        (
+            json!({"verified": []}),
+            json!({"verified": good}),
+            "invalid_request",
+            "both set and appended",
+        ),
+        // `append_key_item`'s item rules.
+        (
+            json!({}),
+            json!({"verified": {}}),
+            "invalid_request",
+            "nonempty",
+        ),
+        (
+            json!({}),
+            json!({"verified": {"by": ["x"]}}),
+            "invalid_request",
+            "must be a string",
+        ),
+        (
+            json!({}),
+            json!({"verified": {"true": "x"}}),
+            "invalid_request",
+            "read back",
+        ),
+        (
+            json!({}),
+            json!({"verified": {"by": "x\ny"}}),
+            "unsupported_syntax",
+            "single-line",
+        ),
+        // A `set` the append rides with is still checked.
+        (
+            json!({"status": "bogus"}),
+            json!({"verified": good}),
+            "invalid_item",
+            "status",
+        ),
+    ] {
+        let out = refuse(
+            &root,
+            "update-item",
+            request(set.clone(), append.clone()),
+            code,
+        );
+        assert!(message(&out).contains(says), "{set} {append}: {out}");
+    }
+    // Not a mapping: the request does not parse.
+    let before = snapshot(&root);
+    for item in [json!("by: x"), json!([{"by": "x"}])] {
+        let (code, out) = rivet(
+            &root,
+            "update-item",
+            request(json!({}), json!({"verified": item})),
+        );
+        assert_eq!(code, 1, "{out}");
+    }
+    assert_eq!(snapshot(&root), before);
+    // A stale guard refuses first, append or not.
+    put(&root, MARGIN, &MARGIN_TEXT.replace("rank: 1", "rank: 2"));
+    let out = refuse(
+        &root,
+        "update-item",
+        request(json!({}), json!({"verified": good})),
+        "guard_conflict",
+    );
+    assert!(message(&out).contains("changed since"), "{out}");
+    // Shapes `append_key_item` does not append to, and the bare mapping a
+    // record reads as one entry, which append never rewrites.
+    for (n, (verified, code, says)) in [
+        (
+            "verified:\n",
+            "unsupported_syntax",
+            "flow or block sequence",
+        ),
+        (
+            "verified: [{by: a, at: 2026-10-01T00:00:00Z},\n  {by: b, at: 2026-10-02T00:00:00Z}]\n",
+            "unsupported_syntax",
+            "flow or block sequence",
+        ),
+        (
+            "verified: {by: a, at: 2026-10-01T00:00:00Z}\n",
+            "unsupported_syntax",
+            "bare mapping",
+        ),
+        (
+            "verified:\n  - {by: a}\n  - b\n",
+            "invalid_item",
+            "invalid before the edit",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = format!("bundle/shape{n}.md");
+        put(
+            &root,
+            &path,
+            &format!("---\ntype: Metric\n{verified}status: draft\n---\n# S\n"),
+        );
+        let guard = record_guard(&root, &path, "concepts");
+        let out = refuse(
+            &root,
+            "update-item",
+            json!({"path": path, "collection": "concepts", "guard": guard,
+                   "set": {"status": "current"}, "append": {"verified": good}}),
+            code,
+        );
+        assert!(message(&out).contains(says), "{verified}: {out}");
+        if says == "bare mapping" {
+            assert!(message(&out).contains("list of entries"), "{out}");
+        }
+    }
+    // The churn fixture's bare mapping reads as one entry, and append
+    // refuses it the same way.
+    let churn = record_guard(&root, CHURN, "concepts");
+    refuse(
+        &root,
+        "update-item",
+        json!({"path": CHURN, "collection": "concepts", "guard": churn, "set": {},
+               "append": {"verified": good}}),
+        "unsupported_syntax",
+    );
+    // A checkbox collection takes no append.
+    let (_, q) = rivet(&root, "query", json!({"collection": "actions"}));
+    let item = &q["items"][0];
+    let out = refuse(
+        &root,
+        "update-item",
+        json!({"path": item["path"], "collection": "actions", "id": item["id"],
+               "guard": item["revision"], "set": {}, "append": {"verified": good}}),
+        "invalid_request",
+    );
+    assert!(message(&out).contains("file records only"), "{out}");
+}
+
+/// An append is never a no-op: with every `set` value current it still
+/// writes the entry.
+#[test]
+fn an_append_with_current_values_still_writes() {
+    let root = records("file-records-append-current");
+    appended(
+        &root,
+        MARGIN,
+        json!({"status": "current"}),
+        json!({"verified": {"by": "human:kim", "at": "2026-12-01T00:00:00Z"}}),
+    );
+    assert_eq!(
+        read(&root, MARGIN),
+        MARGIN_TEXT.replace("10:00:00Z}\n---", &format!("10:00:00Z}}\n  - {ENTRY}\n---"))
+    );
+}
+
+/// The append § Record writes shows, on the fixture it names.
+#[test]
+fn the_documented_record_append_lands() {
+    let root = records("file-records-documented-append");
+    appended(
+        &root,
+        MARGIN,
+        json!({"stale_after": "2027-06-30T00:00:00Z"}),
+        json!({"verified": {"by": "human:sam", "at": "2026-11-22T10:00:00Z"}}),
+    );
+    assert_eq!(
+        read(&root, MARGIN),
+        MARGIN_TEXT
+            .replace("2026-12-31T00:00:00Z", "2027-06-30T00:00:00Z")
+            .replace(
+                "10:00:00Z}\n---",
+                "10:00:00Z}\n  - {by: \"human:sam\", at: 2026-11-22T10:00:00Z}\n---"
+            )
+    );
+}
+
+/// `examples/records/walkthrough.sh`, which usage.md's records walkthrough
+/// abbreviates, passes against this build.
+#[test]
+fn the_records_walkthrough_passes() {
+    use std::process::Command;
+    if Command::new("jq").arg("--version").output().is_err() {
+        eprintln!("skipping: the walkthrough needs jq");
+        return;
+    }
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/records/walkthrough.sh");
+    let mut command = Command::new("bash");
+    let out = common::without_debug_hooks(&mut command)
+        .arg(script)
+        .env("RIVET", env!("CARGO_BIN_EXE_markrivet"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.ends_with("walkthrough ok\n"), "{text}");
+}
