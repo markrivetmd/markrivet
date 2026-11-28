@@ -86,6 +86,21 @@ The native [`doctor` command](docs/usage.md#doctor-collection-health-and-coverag
 checks collection coverage, record validity, stable addressing and structural
 write prerequisites without changing project bytes.
 
+## When to use something else
+
+- **A team that needs to be told.** Assignment, notifications, permissions
+  and a board: use an issue tracker, and link the ticket from the Markdown.
+- **Writers on different machines.** The guard holds inside one checkout;
+  agents in separate clones still meet at a git merge. A tracker with its
+  own sync fits better, such as [Beads](https://github.com/gastownhall/beads),
+  which keeps its issues in Dolt and moves them between machines with Dolt's
+  push and pull.
+- **A queue nobody reads as prose.** A task queue that agents churn through,
+  with little reasoning beside each item, fits an agent issue tracker such
+  as Beads better than a file people open.
+- **High write rates or big data.** Thousands of records, or writes every
+  second: use a database. Rivet is sized for files people still read.
+
 ## Platforms
 
 Linux is supported. CI builds and tests on Linux x86_64 with the pinned
