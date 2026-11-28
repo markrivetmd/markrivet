@@ -336,6 +336,35 @@ binding with `invalid_request`, so a checkbox-only reader that misses its
 that iterate a path's bindings (collection stamping, archive source checks,
 move membership, status) skip file bindings first.
 
+A record write (`update_item` on a file binding) is one change, not a batch of
+native key ops, which could not share a frontmatter. `record_edits` derives
+every splice from the preimage and the request alone, through the renderers
+and shape checks the native key ops use (`scalar_token`, `mapping_field_token`,
+`key_token_site` with `yaml_set` for a flow list, `new_key_line` and `yaml_add`,
+`frontmatter_key_lines` for a removal): one edit per touched key inside its own
+lines, sibling mapping fields composed on their key's lines and re-read as one
+mapping, and added keys merged into one insertion at the payload end by key
+name, coalesced with a removal ending or starting there. A field whose stored
+value equals the request is left alone, so a request of current values has no
+splice. The candidate payload is read back before planning returns.
+`Expectation::Record` carries the request (binding, path, `set`) and the
+expected fields, and re-derives the splices at every stage: `allowed` returns
+exactly their spans, `validate` requires the change's splices to equal them in
+span and text before a candidate is built (which refuses a byte-equivalent
+forgery that containment and the candidate comparison would accept), and the
+candidate check requires every byte before the frontmatter unchanged, the
+frontmatter equal to the preimage's with exactly those splices applied, its keys
+in the derived order with the derived values, every untouched key's value and
+source lines kept (a removed key's trailing comments may extend its
+predecessor), and `schema::record` re-reading the expected fields. The body is
+left to the batch's other expectations and the whole-candidate checks, so a
+record write and a body op combine; `change.frontmatter` keeps any other
+frontmatter op out of the batch. Its guard subject is `GuardSubject::Record`,
+the `record` revision at the write's path, which authorizes only a
+`Expectation::Record` of the same binding and path; a native document or key
+guard never authorizes one. The follow-up guard is the candidate's `record`
+revision.
+
 Guard scope for typed writes is `action` (the whole item) by default and the
 only accepted value. `field` is reserved: it would need a field revision plus
 schema, binding and structural dependencies, and whole-item invariant checks

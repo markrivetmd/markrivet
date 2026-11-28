@@ -673,8 +673,9 @@ named by position (below):
 Recover by reading the unit again, deciding whether the change still makes
 sense, and retrying with the fresh guard. A successful `set`, a stamped
 `insert` and every typed write return the next guard in `ops[n].revision`
-(typed writes also return `collection_revision`), so a follow-up edit needs
-no re-read. `write` always returns the new document `revision`.
+(typed item writes also return `collection_revision`; a record write returns
+the record's next `record` revision and no collection revision), so a
+follow-up edit needs no re-read. `write` always returns the new document `revision`.
 
 A write through a position handle (§ Selectors) is checked the same way: under
 the writer lock, the item at that place must still have the guarded revision
@@ -1900,9 +1901,10 @@ A request carrying `op` is refused with `invalid_request` (*drop "op" from the
 request*), and one without `path` with *missing field `path`*; neither touches
 the file.
 
-`update-item` names its item by exactly one of `id` and `select`, where
-`select` is a position handle or an id selector; both, neither, or another
-selector kind is `invalid_request`. By position, the item needs no stay:
+On a checkbox collection, `update-item` names its item by exactly one of `id`
+and `select`, where `select` is a position handle or an id selector; both,
+neither, or another selector kind is `invalid_request`. A file record is named
+by `path` alone (§ Record writes). By position, the item needs no stay:
 
 ```sh
 echo '{"path": "tracking/TRACKING_WIDGETS.md", "collection": "actions",
@@ -1942,6 +1944,65 @@ write if any field reads back differently from what was asked, naming each field
 that moved and what it re-read as. A title ending in `(YYYY-MM-DD)` is refused
 before that, when the schema has a `title_date` field: the date would read back
 as that field, so pass it there.
+
+#### Record writes
+
+On a file collection (§ File records), `update-item` takes `path`,
+`collection`, `guard` and `set`, and no `id` or `select`, either of which is
+`invalid_request`: the record is the file `path` names, and the guard is its
+`record` revision, as `query` and `map` return it.
+
+```sh
+echo '{"path": "bundle/margin.md", "collection": "concepts", "guard": "<record revision>",
+       "set": {"status": "retired", "stale_after": "2027-06-30T00:00:00Z"}}' | markrivet update-item
+```
+
+Every field in `set` is written in one change, guarded by that one revision,
+and `ops[0].revision` is the record's next `record` revision; there is no `id`
+and no `collection_revision`. Inside `write` the record write is a frontmatter
+change: it combines with body ops in the same batch (a log entry beside the
+status change) and is refused beside any other frontmatter op, as two
+frontmatter ops are. Each field is written as the native key op for its form
+writes it:
+
+| Field state | `set` value | Bytes written | As |
+| --- | --- | --- | --- |
+| key holds a single-line scalar | a scalar | the value token, quote style kept where it still reads back | `set` |
+| key absent | a scalar or a list | a new `key: value` line | `add_key`, `add_key_yaml` |
+| key holds a single-line flow list (`list`) | an array of strings | the token, as `[a, b]` with each element plain where it reads back and quoted otherwise | `set_key_yaml` |
+| key holds a block list (`list`) | an array | refused `unsupported_syntax` | |
+| key holds an empty value (scalar types) | a scalar | refused `unsupported_syntax` | `set` |
+| `field` source, parent and field present | a scalar | the field's token; sibling fields of one key are one edit of its lines | `set_key_field` |
+| `field` source, parent key or field absent | a scalar | refused `missing_selector` | `set_key_field` |
+| `field` source, parent key or field empty | a scalar | refused `unsupported_syntax` | `set_key_field` |
+| key present, `key` source | `null` | the key's lines, leaving trailing standalone comments | `delete_key` |
+| key absent | `null` | nothing | |
+| `field` source | `null` | refused `unsupported_syntax` | |
+| `entries` | anything | refused `unsupported_syntax` | |
+
+A collection where a scalar type reads, or a scalar or list where a `field`
+source reads a mapping, makes the record invalid, which is refused before any field's form is
+looked at (below).
+
+Added keys go in as one insertion at the end of the frontmatter, after any
+trailing standalone comment lines, in key-name order. Removing the last key
+while adding others puts them where its lines were, or after the comments
+that followed it. A write that would leave no key is refused
+`unsupported_syntax`, as `delete_key` refuses deleting the last one.
+
+The checks run in a fixed order, and each refusal leaves the file
+byte-identical: a field the schema does not have (`invalid_request`) or
+`guard_scope: "field"` (`unsupported_syntax`); the guard (`guard_conflict`); a
+file with no frontmatter or frontmatter that does not read
+(`unsupported_syntax`); a record invalid before the edit (`invalid_item`: fix it
+with native key writes); each field's form, by the table, whatever the value;
+each value's type (`invalid_item`, which `null` on a required field also is).
+Then a request whose values all equal the stored ones writes nothing and
+answers `unchanged`. A stored value is compared before defaults, so setting an
+absent key to its default adds the key; an unwritable form or a stale guard
+refuses even when every value is current. The written frontmatter must read
+back as the preimage's with exactly the planned edits and the record must
+re-read as asked, or nothing is written.
 
 ## Stays and evidence
 
@@ -3117,11 +3178,11 @@ not a record rather than leave it invalid.
 A record is named by its project-relative path. It carries no stay id, and a
 file renamed outside Rivet is a different record: a query cursor taken before
 the rename is `stale_cursor`. Its guard is the `record` revision (§ Revisions
-and guards), which `query` and `map` return. Record writes are not implemented,
-and every checkbox-only command refuses a file collection with
-`invalid_request` naming the shape, leaving the file byte-identical:
-`update-item` (an `id` or `select` is refused because a record is addressed by
-path), `insert-item`, `delete` and `set` with the collection, the
+and guards), which `query` and `map` return, and the guard `update-item` writes
+a record under (§ Record writes). Every checkbox-only command refuses a file
+collection with `invalid_request` naming the shape, leaving the file
+byte-identical: `update-item` with an `id` or `select` (a record is addressed
+by path), `insert-item`, `delete` and `set` with the collection, the
 checkbox-only `stamp`, `move`, `revert-item`, `analyze`, `export` and `query`
 with `ready`. `item-log` still reads history, with `restore_guard: null` and
 that refusal as `restore_diagnostic`. A file bound by a checkbox and a file
@@ -3301,8 +3362,10 @@ These are design directions, not features:
   `append_key_item`'s, editing or removing a frontmatter list item, and
   mapping field paths deeper than one parent and one scalar field.
 - Token counts. Sizes are reported in bytes; no tokenizer is bundled.
-- Writes to file records, typed record creation, and archives, `ready` waits
-  and moves for file records (§ File records).
+- Typed record creation (`insert-item` on a file collection; `create` writes a
+  new file), record writes that add a missing mapping or mapping field, replace
+  a block list or append to an `entries` field, and archives, `ready` waits and
+  moves for file records (§ File records, § Record writes).
 - General directory creation (`archive-mkdir` creates confined archive parents),
   and adding frontmatter to a document that has none.
 
