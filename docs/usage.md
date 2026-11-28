@@ -3166,8 +3166,10 @@ with every field read from a top-level frontmatter key:
 ```
 
 An Open Knowledge Format (OKF) v0.3 bundle binds this way, one concept per
-file with its `index.md` and `log.md` files excluded; on OKF's `acme_retail`
-sample at commit `527e81a`, record writes through such a binding left OKF's
+file with its `index.md` and `log.md` files excluded, under a schema of its own:
+OKF's `status` values are `draft`, `stable` and `deprecated`, so the schema
+above would read its concepts as invalid. On OKF's `acme_retail` sample at
+commit `527e81a`, record writes through such a binding left OKF's
 `validate.py` with no new error or warning and moved its `scan.py` trust tiers
 only where a write changed `verified` or `generated.at`.
 
