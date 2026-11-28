@@ -175,6 +175,10 @@ pub enum Op {
         #[serde(default)]
         guard_scope: GuardScope,
         set: BTreeMap<String, Value>,
+        /// File records only: one flat mapping appended to each named
+        /// `entries` field, in the same change as `set`.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        append: BTreeMap<String, serde_json::Map<String, Value>>,
     },
     /// Typed insertion into a bound collection.
     InsertItem {
@@ -860,7 +864,9 @@ mod refresh;
 pub(crate) use carrier::Carriers;
 pub(crate) use intent::{Expectation, Guard, GuardSubject};
 pub(crate) use move_intent::{plan as move_item, plan_section as move_section};
-pub(crate) use record::{RecordExpectation, record_edits, record_request, record_scalars};
+pub(crate) use record::{
+    RecordExpectation, record_edits, record_request, record_scalars, record_shape,
+};
 pub(crate) use refresh::unrefreshable;
 pub use refresh::{RefreshSelect, Refreshed};
 

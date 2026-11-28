@@ -1,7 +1,7 @@
 //! File-record writes: every key edit one `update_item` asks of a record,
-//! derived from the preimage and the request alone. Planning and the intent
-//! gate both call [`record_edits`], so the gate never trusts the planner's
-//! change.
+//! its `set` values and its `append` entries, derived from the preimage and
+//! the request alone. Planning and the intent gate both call
+//! [`record_edits`], so the gate never trusts the planner's change.
 use super::intent::{preserve_frontmatter, spliced_frontmatter};
 use super::*;
 use crate::schema::{self, Bound, FieldSpec, FieldType};
@@ -13,8 +13,12 @@ pub(crate) struct RecordExpectation {
     pub bound: Bound,
     pub path: String,
     pub set: BTreeMap<String, Value>,
+    pub append: Appends,
     pub expect: Map<String, Value>,
 }
+
+/// The `append` of a record write: one flat mapping per `entries` field.
+pub(crate) type Appends = BTreeMap<String, Map<String, Value>>;
 
 /// The splices a record write makes and what its frontmatter reads as after.
 pub(crate) struct RecordEdits {
@@ -27,6 +31,8 @@ pub(crate) struct RecordEdits {
     pub others: Vec<(String, Value, String)>,
     /// A key is removed, so a neighbour may gain its trailing comments.
     pub removes: bool,
+    /// Each appended field's whole sequence after the write.
+    pub appended: BTreeMap<String, Value>,
 }
 
 /// One requested field, checked.
@@ -36,8 +42,52 @@ pub(crate) struct Want<'a> {
     pub value: &'a Value,
 }
 
+/// One requested append, checked: the field, its key, and the one splice
+/// `append_key_item` would make for it.
+pub(crate) struct Entry<'a> {
+    pub name: &'a str,
+    pub key: &'a str,
+    pub write: AppendWrite,
+}
+
+/// An insert's place among those at one offset: appends to existing keys
+/// (`false`) by key index, then added keys (`true`) by name.
+type InsertOrder<'a> = (bool, usize, &'a str);
+
 fn unsupported(message: String) -> Diagnostic {
     err(ErrorCode::UnsupportedSyntax, message)
+}
+
+/// The request's shape, checked before the guard: every field `set` or
+/// `append` names is the schema's, `append` names only `entries` fields,
+/// and no field is both set and appended to.
+pub(crate) fn record_shape(
+    bound: &Bound,
+    set: &BTreeMap<String, Value>,
+    append: &Appends,
+) -> Result<(), Diagnostic> {
+    let invalid = |m: String| err(ErrorCode::InvalidRequest, m);
+    for name in set.keys().chain(append.keys()) {
+        if !bound.schema.fields.contains_key(name) {
+            return Err(invalid(format!(
+                "{name} is not a field of {}",
+                bound.schema.id
+            )));
+        }
+    }
+    for name in append.keys() {
+        if bound.schema.fields[name].kind != FieldType::Entries {
+            return Err(invalid(format!(
+                "field {name} does not hold entries; append adds to entries fields only"
+            )));
+        }
+        if set.contains_key(name) {
+            return Err(invalid(format!(
+                "field {name} is both set and appended to; a request does one or the other"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The request checked in D7's order up to the no-op test: every field named
@@ -47,7 +97,9 @@ pub(crate) fn record_request<'a>(
     doc: &Document,
     bound: &'a Bound,
     set: &'a BTreeMap<String, Value>,
-) -> Result<Vec<Want<'a>>, Diagnostic> {
+    append: &'a Appends,
+) -> Result<(Vec<Want<'a>>, Vec<Entry<'a>>), Diagnostic> {
+    record_shape(bound, set, append)?;
     let scalars = record_scalars(doc)?;
     let mut wants = vec![];
     for (name, value) in set {
@@ -66,6 +118,20 @@ pub(crate) fn record_request<'a>(
             value,
         });
     }
+    let mut entries = vec![];
+    for (name, item) in append {
+        let spec = &bound.schema.fields[name];
+        let key = spec.key.as_deref().expect("a file schema reads keys");
+        if scalars.iter().any(|s| s.key == key && s.value.is_object()) {
+            return Err(unsupported(format!(
+                "field {name}: frontmatter key {key} holds one entry as a bare mapping; append \
+                 writes only to a list of entries ({key}: [{{...}}] or a block sequence) and \
+                 never rewrites the shape"
+            )));
+        }
+        let write = yaml_append(doc, key, item)?;
+        entries.push(Entry { name, key, write });
+    }
     for want in &wants {
         if want.value.is_null() {
             if want.spec.required {
@@ -79,7 +145,11 @@ pub(crate) fn record_request<'a>(
                 .map_err(|m| err(ErrorCode::InvalidItem, format!("{}: {m}", want.name)))?;
         }
     }
-    Ok(wants)
+    for entry in &entries {
+        schema::check_value(&bound.schema.fields[entry.name], &entry.write.expect)
+            .map_err(|m| err(ErrorCode::InvalidItem, format!("{}: {m}", entry.name)))?;
+    }
+    Ok((wants, entries))
 }
 
 /// The frontmatter's fields, or the refusal a record write gives when it has
@@ -175,16 +245,18 @@ fn current(doc: &Document, spec: &FieldSpec, value: &Value) -> bool {
     }
 }
 
-/// Every splice the request makes, derived from the preimage (D7). Each
-/// touched key yields one edit inside its own extent; added keys share one
-/// insertion at the payload end, by key name; a field whose value is current
-/// is left alone.
+/// Every splice the request makes, derived from the preimage. Each touched
+/// key yields one edit inside its own extent; added keys share one insertion
+/// at the payload end, by key name; an append to an existing key inserts
+/// where `append_key_item` would; a field whose value is current is left
+/// alone.
 pub(crate) fn record_edits(
     doc: &Document,
     bound: &Bound,
     set: &BTreeMap<String, Value>,
+    append: &Appends,
 ) -> Result<RecordEdits, Diagnostic> {
-    let wants = record_request(doc, bound, set)?;
+    let (wants, entries) = record_request(doc, bound, set, append)?;
     let scalars = record_scalars(doc)?;
     let payload = doc.frontmatter.payload.expect("checked by record_scalars");
     let mut by_key: BTreeMap<&str, Vec<&Want>> = BTreeMap::new();
@@ -263,14 +335,40 @@ pub(crate) fn record_edits(
             }
         }
     }
+    // Zero-width insertions by offset, each with its place in the merged
+    // insert there: appends to existing keys in key order, then added keys
+    // by name (an append to an absent key adds it).
+    let mut inserts: BTreeMap<usize, Vec<(InsertOrder, String)>> = BTreeMap::new();
+    let mut appended = BTreeMap::new();
+    for entry in entries {
+        let AppendWrite { splice, k, expect } = entry.write;
+        appended.insert(entry.name.to_string(), expect.clone());
+        match k {
+            Some(k) => {
+                inserts
+                    .entry(splice.span.start)
+                    .or_default()
+                    .push(((false, k, entry.key), splice.text));
+                touched.insert(entry.key, expect);
+            }
+            None => added.push((entry.key, splice.text, expect)),
+        }
+    }
+    added.sort_by_key(|(key, _, _)| *key);
     keys_remain(scalars.len() - removed.len() + added.len())?;
-    if !added.is_empty() {
-        // Added keys share one insertion at the payload end. A removal that
-        // ends there, then the insertion, then a removal that starts there
-        // become one replacement whose text is the insertion.
-        let at = payload.end;
+    for (key, text, _) in &added {
+        inserts
+            .entry(payload.end)
+            .or_default()
+            .push(((true, 0, key), text.clone()));
+    }
+    let removal = |s: &Splice| s.text.is_empty() && !s.span.is_empty();
+    for (at, mut group) in inserts {
+        // At one offset: the removal ending there, then the merged insert,
+        // then the removal starting there, as one replacement whose text is
+        // the insert.
+        group.sort_by(|a, b| a.0.cmp(&b.0));
         let mut span = Span { start: at, end: at };
-        let removal = |s: &Splice| s.text.is_empty() && !s.span.is_empty();
         if let Some(i) = splices.iter().position(|s| removal(s) && s.span.end == at) {
             span.start = splices.remove(i).span.start;
         }
@@ -282,7 +380,7 @@ pub(crate) fn record_edits(
         }
         splices.push(Splice {
             span,
-            text: added.iter().map(|(_, text, _)| text.as_str()).collect(),
+            text: group.into_iter().map(|(_, text)| text).collect(),
         });
     }
     splices.sort_by_key(|s| (s.span.start, s.span.end));
@@ -310,6 +408,7 @@ pub(crate) fn record_edits(
         keys,
         others,
         removes: !removed.is_empty(),
+        appended,
     };
     edits.reads_back(doc, payload)?;
     Ok(edits)
@@ -342,7 +441,7 @@ impl RecordEdits {
 
 impl RecordExpectation {
     pub(crate) fn edits(&self, doc: &Document) -> Result<RecordEdits, Diagnostic> {
-        record_edits(doc, &self.bound, &self.set)
+        record_edits(doc, &self.bound, &self.set, &self.append)
     }
 
     /// The change's splices are exactly the derived ones, spans and texts,

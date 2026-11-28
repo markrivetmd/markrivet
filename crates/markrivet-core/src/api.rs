@@ -1182,8 +1182,18 @@ fn write(
                             guard,
                             guard_scope,
                             set,
+                            append,
                         } => (|| {
                             let bound = find(collection)?;
+                            if !bound.is_file() && !append.is_empty() {
+                                return Err(Diagnostic::new(
+                                    ErrorCode::InvalidRequest,
+                                    format!(
+                                        "collection {collection} holds checkbox items; append \
+                                         adds entries to file records only"
+                                    ),
+                                ));
+                            }
                             if bound.is_file() {
                                 if id.is_some() || select.is_some() {
                                     return Err(Diagnostic::new(
@@ -1201,6 +1211,7 @@ fn write(
                                     guard,
                                     *guard_scope,
                                     set,
+                                    append,
                                 );
                             }
                             let locator = match (id, select) {

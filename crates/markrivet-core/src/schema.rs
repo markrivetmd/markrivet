@@ -2686,11 +2686,12 @@ pub(crate) fn plan_update(
 }
 
 /// Plan an `update_item` on the file record at `path`: one change carrying
-/// every key edit, guarded by the record revision. Checked in a fixed order:
-/// the request's shape, the guard, the frontmatter existing and reading, the
-/// record valid before the edit, each field's source form, each value's
-/// type, then the no-op test (every value current: no splice, `unchanged`)
-/// and the planning itself.
+/// every key edit and every appended entry, guarded by the record revision.
+/// Checked in a fixed order: the request's shape, the guard, the
+/// frontmatter existing and reading, the record valid before the edit, each
+/// field's source form, each value's type, then the no-op test (every value
+/// current and nothing appended: no splice, `unchanged`) and the planning
+/// itself.
 pub fn plan_record_update(
     planner: &mut Planner,
     bound: &Bound,
@@ -2698,6 +2699,7 @@ pub fn plan_record_update(
     guard: &str,
     scope: GuardScope,
     set: &BTreeMap<String, Value>,
+    append: &BTreeMap<String, Map<String, Value>>,
 ) -> Result<Change, Diagnostic> {
     use crate::edit::{Expectation, Follow, Guard, GuardSubject, RecordExpectation};
     if !bound.is_file() {
@@ -2710,12 +2712,7 @@ pub fn plan_record_update(
         ));
     }
     refuse_field_scope(scope)?;
-    if let Some(name) = set.keys().find(|n| !bound.schema.fields.contains_key(*n)) {
-        return Err(Diagnostic::new(
-            ErrorCode::InvalidRequest,
-            format!("{name} is not a field of {}", bound.schema.id),
-        ));
-    }
+    crate::edit::record_shape(bound, set, append)?;
     let doc = planner.doc;
     let intent_guard = Guard::new(
         GuardSubject::Record {
@@ -2735,8 +2732,8 @@ pub fn plan_record_update(
             ),
         )
     })?;
-    crate::edit::record_request(doc, bound, set)?;
-    let edits = crate::edit::record_edits(doc, bound, set)?;
+    crate::edit::record_request(doc, bound, set, append)?;
+    let edits = crate::edit::record_edits(doc, bound, set, append)?;
     let mut expect = before;
     for (name, v) in set {
         match (v, &bound.schema.fields[name].default) {
@@ -2745,6 +2742,7 @@ pub fn plan_record_update(
             _ => expect.insert(name.clone(), v.clone()),
         };
     }
+    expect.extend(edits.appended.clone());
     let follow = (bound.clone(), path.to_string());
     let mut change = Change {
         splices: edits.splices,
@@ -2755,6 +2753,7 @@ pub fn plan_record_update(
             bound: bound.clone(),
             path: path.to_string(),
             set: set.clone(),
+            append: append.clone(),
             expect,
         }))),
         guard: Some(intent_guard),

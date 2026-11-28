@@ -1177,7 +1177,8 @@ const RECORD_SCHEMA: &[u8] = br#"{"id": "rec", "version": 1, "item": "file", "fi
   "rank":   {"type": "number",    "from": "key", "key": "rank"},
   "tags":   {"type": "list",      "from": "key", "key": "tags"},
   "by":     {"type": "string",    "from": "key", "key": "generated", "field": "by"},
-  "at":     {"type": "timestamp", "from": "key", "key": "generated", "field": "at"}}}"#;
+  "at":     {"type": "timestamp", "from": "key", "key": "generated", "field": "at"},
+  "verified": {"type": "entries", "from": "key", "key": "verified"}}}"#;
 
 fn record_binding() -> markrivet_core::schema::Bound {
     markrivet_core::schema::bind_bytes(
@@ -1198,9 +1199,18 @@ fn record_binding() -> markrivet_core::schema::Bound {
 }
 
 fn plan_record(doc: &Document, set: &Value) -> Result<edit::Change, Diagnostic> {
+    plan_record_append(doc, set, &json!({}))
+}
+
+fn plan_record_append(
+    doc: &Document,
+    set: &Value,
+    append: &Value,
+) -> Result<edit::Change, Diagnostic> {
     let bound = record_binding();
     let guard = markrivet_core::schema::record_revision(doc, "r.md", &bound);
     let set = serde_json::from_value(set.clone()).unwrap();
+    let append = serde_json::from_value(append.clone()).unwrap();
     markrivet_core::schema::plan_record_update(
         &mut Planner::new(doc),
         &bound,
@@ -1208,6 +1218,7 @@ fn plan_record(doc: &Document, set: &Value) -> Result<edit::Change, Diagnostic> 
         &guard,
         markrivet_core::GuardScope::Action,
         &set,
+        &append,
     )
 }
 
@@ -1378,4 +1389,107 @@ fn native_key_ops_plan_what_record_writes_share() {
             .replace("2026-10-01", "2026-12-01")
             .replace("rank: 1\n", "")
     );
+}
+
+/// A combined record change (a `set`, an append to a block sequence and the
+/// removal of the key after it, coalesced into one replacement) with its
+/// splices forged so the values still decode as asked: each is refused at
+/// the intent gate. Splitting the coalesced replacement back into an insert
+/// and a removal writes the same bytes, so only the exact comparison with
+/// the derived splices refuses it.
+#[test]
+fn a_forged_combined_append_is_refused_by_the_intent_gate() {
+    let source = "---\nstatus: old\nverified:\n  - {by: agent, at: 2026-10-01T00:00:00Z} # v\nrank: 1\n# kept\ntags: [a]\n---\n# T\n\nBody.\n";
+    let set = json!({"status": "new", "rank": null});
+    let append = json!({"verified": {"by": "kim", "at": "2026-12-01T00:00:00Z"}});
+    let doc = Document::parse(source).unwrap();
+    let planned = plan_record_append(&doc, &set, &append).unwrap();
+    let landed = edit::plan(&doc, vec![planned]).unwrap().candidate;
+    assert_eq!(
+        landed,
+        source
+            .replace("status: old", "status: new")
+            .replace("rank: 1\n", "  - {by: kim, at: 2026-12-01T00:00:00Z}\n")
+    );
+    let entry = "  - {by: kim, at: 2026-12-01T00:00:00Z}\n";
+    let rank = span_of(source, "rank: 1\n");
+    let coalesced = move |splices: &mut Vec<edit::Splice>| -> usize {
+        splices.iter().position(|s| s.span == rank).unwrap()
+    };
+    type Forge = Box<dyn Fn(&mut Vec<edit::Splice>)>;
+    let forgeries: Vec<(&str, Forge)> = vec![
+        // The entry respaced, decoding the same.
+        (
+            "spacing",
+            Box::new(move |splices| {
+                let i = coalesced(splices);
+                splices[i].text = "  - { by: kim, at: 2026-12-01T00:00:00Z }\n".into();
+            }),
+        ),
+        // The existing entry's comment dropped by widening the splice.
+        (
+            "comment",
+            Box::new(move |splices| {
+                let i = coalesced(splices);
+                splices[i].span.start -= " # v\n".len();
+                splices[i].text = format!("\n{entry}");
+            }),
+        ),
+        // The entry inserted after the standalone comment instead.
+        (
+            "extent",
+            Box::new(move |splices| {
+                let i = coalesced(splices);
+                splices[i].span.end += "# kept\n".len();
+                splices[i].text = format!("# kept\n{entry}");
+            }),
+        ),
+        // The same bytes as an insert and a removal: not the derived list.
+        (
+            "split",
+            Box::new(move |splices| {
+                let i = coalesced(splices);
+                let at = rank.start;
+                splices[i].text = String::new();
+                splices.insert(
+                    i,
+                    edit::Splice {
+                        span: markrivet_core::Span { start: at, end: at },
+                        text: entry.into(),
+                    },
+                );
+            }),
+        ),
+        // A body splice riding along.
+        (
+            "body",
+            Box::new(move |splices| {
+                let at = span_of(source, "Body.").end;
+                splices.push(edit::Splice {
+                    span: markrivet_core::Span { start: at, end: at },
+                    text: " More.".into(),
+                });
+            }),
+        ),
+    ];
+    for (name, forge) in forgeries {
+        let mut change = plan_record_append(&doc, &set, &append).unwrap();
+        forge(&mut change.splices);
+        let error = edit::plan(&doc, vec![change]).unwrap_err();
+        assert!(
+            matches!(
+                error.code,
+                ErrorCode::InvalidRequest | ErrorCode::InvalidContent
+            ),
+            "{name}: {error:?}"
+        );
+        if name == "split" {
+            assert!(
+                error
+                    .message
+                    .contains("exactly the splices its request derives"),
+                "{error:?}"
+            );
+        }
+    }
 }

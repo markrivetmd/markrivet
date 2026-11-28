@@ -877,6 +877,7 @@ fn record_update(doc: &Document, bound: &schema::Bound) -> Change {
         &schema::record_revision(doc, "r.md", bound),
         GuardScope::Action,
         &BTreeMap::from([("status".into(), json!("done"))]),
+        &BTreeMap::new(),
     )
     .unwrap()
 }
