@@ -2770,3 +2770,42 @@ pub fn plan_stamp_collections(
     change.preflight(doc)?;
     Ok(change)
 }
+
+#[cfg(test)]
+mod pinned_tests {
+    use super::*;
+
+    const PROJECT: &str = include_str!("../../../examples/tracker/.rivet/project.json");
+    const SCHEMA: &str =
+        include_str!("../../../examples/tracker/.rivet/schemas/tracker-action.json");
+    const WIDGETS: &str = include_str!("../../../examples/tracker/tracking/TRACKING_WIDGETS.md");
+
+    /// Checkbox guards a caller already holds must not move when the binding
+    /// grows new shapes: the fingerprint tuple, an `action` and a
+    /// `collection` revision from the example tracker, as literals.
+    #[test]
+    fn checkbox_binding_and_revisions_are_pinned() {
+        let config: ProjectConfig = serde_json::from_str(PROJECT).unwrap();
+        let bound = bind_bytes(
+            "actions",
+            config.collections["actions"].clone(),
+            SCHEMA.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            bound.binding,
+            "fc197f3469b5ac20460e2d0fa9bf02b6ba27f40a9fa9c96f6a1d7e610fcc55c0"
+        );
+        let doc = Document::parse(WIDGETS).unwrap();
+        let inst = instance(&doc, &bound).unwrap().unwrap();
+        let (list, item) = inst.items[0];
+        assert_eq!(
+            item_revision(&doc, &bound, list, item),
+            "rivet:v1:action:fdb009a755d9721389ae7f62002ce876"
+        );
+        assert_eq!(
+            collection_revision(&doc, &bound, &inst),
+            "rivet:v1:collection:37611eeca9c98d8682550333d321476c"
+        );
+    }
+}
