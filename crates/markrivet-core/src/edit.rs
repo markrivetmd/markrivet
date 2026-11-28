@@ -301,6 +301,135 @@ pub(crate) fn new_key_site(doc: &Document, key: &str) -> Result<Span, Diagnostic
     Ok(payload)
 }
 
+/// Key `k`'s single-line scalar token rewritten to `value`, keeping its
+/// quote style where that still reads back. `set` and record writes share it.
+pub(crate) fn scalar_token(doc: &Document, k: usize, value: &Value) -> Result<Splice, Diagnostic> {
+    let scalar = writable_scalar(doc, k)?;
+    let line = &doc.source[scalar.line.start..scalar.line.end];
+    let relative = Span {
+        start: scalar.span.start - scalar.line.start,
+        end: scalar.span.end - scalar.line.start,
+    };
+    let text =
+        yaml::render_scalar(line, relative, &scalar.style, value).ok_or_else(unrenderable)?;
+    Ok(Splice {
+        span: scalar.span,
+        text,
+    })
+}
+
+/// Key `k` when `set` can rewrite its value in place: a single-line scalar,
+/// not an empty value, a list or a mapping.
+pub(crate) fn writable_scalar(doc: &Document, k: usize) -> Result<&yaml::Scalar, Diagnostic> {
+    let scalar = &doc.scalars()[k];
+    if !scalar.writable {
+        return Err(err(
+            ErrorCode::UnsupportedSyntax,
+            format!(
+                "frontmatter key {} is read-only: Rivet writes single-line scalars, \
+                 not an empty value, a list or a mapping",
+                scalar.key
+            ),
+        ));
+    }
+    Ok(scalar)
+}
+
+/// One existing scalar field of key `k`'s one-level mapping rewritten to
+/// `value`, and the parent's value after it. `set_key_field` and record
+/// writes share it.
+pub(crate) fn mapping_field_token(
+    doc: &Document,
+    k: usize,
+    field: &str,
+    value: &Value,
+) -> Result<(Splice, Value), Diagnostic> {
+    let parent = &doc.scalars()[k];
+    let scalar = mapping_field_site(doc, k, field)?;
+    let mut expect = parent.value.clone();
+    expect[field] = value.clone();
+    let line = &doc.source[parent.line.start..parent.line.end];
+    let text =
+        yaml::render_mapping_field(line, &scalar, value, &expect).ok_or_else(unrenderable)?;
+    Ok((
+        Splice {
+            span: Span {
+                start: parent.line.start + scalar.span.start,
+                end: parent.line.start + scalar.span.end,
+            },
+            text,
+        },
+        expect,
+    ))
+}
+
+/// The token of one existing scalar field of key `k`'s one-level mapping,
+/// relative to the key's lines: the parent must be a mapping holding the
+/// field, and the field a nonempty single-line scalar.
+pub(crate) fn mapping_field_site(
+    doc: &Document,
+    k: usize,
+    field: &str,
+) -> Result<yaml::MappingScalar, Diagnostic> {
+    let parent = &doc.scalars()[k];
+    let mapping = parent.value.as_object().ok_or_else(|| {
+        err(
+            ErrorCode::UnsupportedSyntax,
+            "set_key_field requires a mapping parent",
+        )
+    })?;
+    if !mapping.contains_key(field) {
+        return Err(err(
+            ErrorCode::MissingSelector,
+            format!("mapping field {field:?} does not exist"),
+        ));
+    }
+    let line = &doc.source[parent.line.start..parent.line.end];
+    yaml::mapping_field(line, field).ok_or_else(|| {
+        err(
+            ErrorCode::UnsupportedSyntax,
+            "mapping field must be an existing nonempty single-line scalar",
+        )
+    })
+}
+
+/// Where a new `key: value` line goes and its text, for a scalar value.
+/// `add_key` and record writes share it.
+pub(crate) fn new_key_line(
+    doc: &Document,
+    key: &str,
+    value: &Value,
+) -> Result<(Span, String), Diagnostic> {
+    let payload = new_key_site(doc, key)?;
+    let prefix = format!("{key}: ");
+    let at = Span {
+        start: prefix.len(),
+        end: prefix.len(),
+    };
+    let value_text = yaml::render_scalar(&prefix, at, "Plain", value).ok_or_else(unrenderable)?;
+    Ok((payload, format!("{prefix}{value_text}{}", doc.newline)))
+}
+
+/// Removing keys may not leave the frontmatter without one: without a
+/// YAML-looking line the fences become Markdown, which can change body
+/// ownership. Refuse rather than synthesize a placeholder.
+pub(crate) fn keys_remain(left: usize) -> Result<(), Diagnostic> {
+    if left == 0 {
+        return Err(err(
+            ErrorCode::UnsupportedSyntax,
+            "cannot delete the last frontmatter key; the fences would become Markdown",
+        ));
+    }
+    Ok(())
+}
+
+fn unrenderable() -> Diagnostic {
+    err(
+        ErrorCode::UnsupportedSyntax,
+        "value cannot be written as a single-line JSON-compatible YAML scalar",
+    )
+}
+
 /// The name rule every key Rivet adds shares, top-level or inside a new
 /// sequence item.
 pub(crate) fn check_key_name(what: &str, key: &str) -> Result<(), Diagnostic> {
@@ -352,12 +481,6 @@ pub(crate) fn yaml_append(
             )));
         }
     }
-    let unrenderable = || {
-        err(
-            ErrorCode::UnsupportedSyntax,
-            "value cannot be written as a single-line JSON-compatible YAML scalar",
-        )
-    };
     let fields = doc.frontmatter.fields.as_ref().map_err(Clone::clone)?;
     let Some(k) = fields.iter().position(|s| s.key == key) else {
         let payload = new_key_site(doc, key)?;
@@ -555,6 +678,39 @@ pub(crate) fn yaml_set(
         .scalars()
         .get(k)
         .ok_or_else(|| err(ErrorCode::InvalidRequest, "intent names a missing key"))?;
+    let (first, old) = key_token_site(doc, k)?;
+    let expect = yaml::raw_token(raw).ok_or_else(|| unsupported_token(raw))?;
+    let end = if replace_line {
+        first.len()
+    } else {
+        old.token.end
+    };
+    let first_line = format!("{}{raw}{}", &first[..old.token.start], &first[end..]);
+    let write = YamlWrite {
+        splice: Splice {
+            span: Span {
+                start: scalar.line.start + old.token.start,
+                end: scalar.line.start + end,
+            },
+            text: raw.to_string(),
+        },
+        expect,
+        first_line,
+        token_start: old.token.start,
+        token: raw.to_string(),
+    };
+    yaml_reads_back(doc, &write, &scalar.key, Some(k))?;
+    Ok(write)
+}
+
+/// Key `k`'s first line (without its terminator) and value token, when a
+/// raw write can replace that token: the key holds a single-line scalar or
+/// flat flow sequence, and any later lines the reader gave it are comments.
+pub(crate) fn key_token_site(
+    doc: &Document,
+    k: usize,
+) -> Result<(&str, yaml::KeyLineToken), Diagnostic> {
+    let scalar = &doc.scalars()[k];
     let shape = || {
         err(
             ErrorCode::UnsupportedSyntax,
@@ -581,28 +737,7 @@ pub(crate) fn yaml_set(
     if old.key != scalar.key || old.value != scalar.value {
         return Err(shape());
     }
-    let expect = yaml::raw_token(raw).ok_or_else(|| unsupported_token(raw))?;
-    let end = if replace_line {
-        first.len()
-    } else {
-        old.token.end
-    };
-    let first_line = format!("{}{raw}{}", &first[..old.token.start], &first[end..]);
-    let write = YamlWrite {
-        splice: Splice {
-            span: Span {
-                start: scalar.line.start + old.token.start,
-                end: scalar.line.start + end,
-            },
-            text: raw.to_string(),
-        },
-        expect,
-        first_line,
-        token_start: old.token.start,
-        token: raw.to_string(),
-    };
-    yaml_reads_back(doc, &write, &scalar.key, Some(k))?;
-    Ok(write)
+    Ok((first, old))
 }
 
 /// The candidate payload must read, through the unchanged frontmatter
@@ -2485,36 +2620,12 @@ impl<'a> Planner<'a> {
 
     fn set_frontmatter(&mut self, k: usize, value: &Value) -> Result<Change, Diagnostic> {
         let doc = self.doc;
-        let scalar = &doc.scalars()[k];
-        if !scalar.writable {
-            return Err(err(
-                ErrorCode::UnsupportedSyntax,
-                format!(
-                    "frontmatter key {} is read-only: Rivet writes single-line scalars, \
-                     not an empty value, a list or a mapping",
-                    scalar.key
-                ),
-            ));
-        }
-        let line = &doc.source[scalar.line.start..scalar.line.end];
-        let relative = Span {
-            start: scalar.span.start - scalar.line.start,
-            end: scalar.span.end - scalar.line.start,
-        };
-        let text = yaml::render_scalar(line, relative, &scalar.style, value).ok_or_else(|| {
-            err(
-                ErrorCode::UnsupportedSyntax,
-                "value cannot be written as a single-line JSON-compatible YAML scalar",
-            )
-        })?;
-        let key = scalar.key.clone();
+        let splice = scalar_token(doc, k, value)?;
+        let key = doc.scalars()[k].key.clone();
         let others = frontmatter_others(doc, Some(&key));
         let expect = value.clone();
         let mut change = Change {
-            splices: vec![Splice {
-                span: scalar.span,
-                text,
-            }],
+            splices: vec![splice],
             ..Change::default()
         };
         change.follow = Some(Follow::FrontmatterKey(key.clone()));
@@ -2536,42 +2647,10 @@ impl<'a> Planner<'a> {
     ) -> Result<Change, Diagnostic> {
         let doc = self.doc;
         let parent = &doc.scalars()[k];
-        let mut expect = parent.value.clone();
-        let mapping = expect.as_object_mut().ok_or_else(|| {
-            err(
-                ErrorCode::UnsupportedSyntax,
-                "set_key_field requires a mapping parent",
-            )
-        })?;
-        let old = mapping.get_mut(field).ok_or_else(|| {
-            err(
-                ErrorCode::MissingSelector,
-                format!("mapping field {field:?} does not exist"),
-            )
-        })?;
-        *old = value.clone();
-        let line = &doc.source[parent.line.start..parent.line.end];
-        let scalar = yaml::mapping_field(line, field).ok_or_else(|| {
-            err(
-                ErrorCode::UnsupportedSyntax,
-                "mapping field must be an existing nonempty single-line scalar",
-            )
-        })?;
-        let text = yaml::render_mapping_field(line, &scalar, value, &expect).ok_or_else(|| {
-            err(
-                ErrorCode::UnsupportedSyntax,
-                "value cannot be written as a single-line JSON-compatible YAML scalar",
-            )
-        })?;
+        let (splice, expect) = mapping_field_token(doc, k, field, value)?;
         let others = frontmatter_others(doc, Some(&parent.key));
         Ok(Change {
-            splices: vec![Splice {
-                span: Span {
-                    start: parent.line.start + scalar.span.start,
-                    end: parent.line.start + scalar.span.end,
-                },
-                text,
-            }],
+            splices: vec![splice],
             follow: Some(Follow::FrontmatterKey(parent.key.clone())),
             expectation: Some(Expectation::Frontmatter {
                 k,
@@ -2586,14 +2665,7 @@ impl<'a> Planner<'a> {
 
     fn delete_key(&mut self, k: usize) -> Result<Change, Diagnostic> {
         let doc = self.doc;
-        // Without a YAML-looking line the fences become Markdown, which can
-        // change body ownership. Refuse rather than synthesize a placeholder.
-        if doc.scalars().len() == 1 {
-            return Err(err(
-                ErrorCode::UnsupportedSyntax,
-                "cannot delete the last frontmatter key; the fences would become Markdown",
-            ));
-        }
+        keys_remain(doc.scalars().len() - 1)?;
         let scalar = &doc.scalars()[k];
         let span = frontmatter_key_lines(doc, k);
         Ok(Change {
@@ -2946,19 +3018,7 @@ impl<'a> Planner<'a> {
     /// A new top-level frontmatter line, `key: value`, after the last field.
     fn add_key(&mut self, key: &str, value: &Value) -> Result<Change, Diagnostic> {
         let doc = self.doc;
-        let payload = new_key_site(doc, key)?;
-        let prefix = format!("{key}: ");
-        let at = Span {
-            start: prefix.len(),
-            end: prefix.len(),
-        };
-        let value_text = yaml::render_scalar(&prefix, at, "Plain", value).ok_or_else(|| {
-            err(
-                ErrorCode::UnsupportedSyntax,
-                "value cannot be written as a single-line JSON-compatible YAML scalar",
-            )
-        })?;
-        let text = format!("{prefix}{value_text}{}", doc.newline);
+        let (payload, text) = new_key_line(doc, key, value)?;
         let others = frontmatter_others(doc, None);
         let key = key.to_string();
         let expect = value.clone();
