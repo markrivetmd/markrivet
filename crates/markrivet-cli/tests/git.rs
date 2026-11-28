@@ -685,3 +685,43 @@ fn status_tells_two_sections_with_one_title_apart() {
     let units = &path_report(&out, WIDGETS)["units"];
     assert!(ids(&units["moved"]).contains(&beta_id), "{units}");
 }
+
+/// A file-record write lands as one commit carrying its `Rivet-Op` trailer,
+/// like any other write in commit mode.
+#[test]
+fn a_record_write_commits_with_its_rivet_op_trailer() {
+    let r = Repo::new("git-record-write-commits");
+    let config = r.root.join(".rivet/project.json");
+    let mut c: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    c["git"] = json!({"commit": "per-write", "on_dirty": "refuse"});
+    c["collections"]["notes"] = json!({"schema": "note@1", "files": ["notes/*.md"]});
+    std::fs::write(&config, c.to_string()).unwrap();
+    std::fs::write(
+        r.root.join(".rivet/schemas/note.json"),
+        r#"{"id": "note", "version": 1, "item": "file", "fields": {
+          "status": {"type": "enum", "from": "key", "key": "status", "values": ["open", "done"]}}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(r.root.join("notes")).unwrap();
+    std::fs::write(r.root.join("notes/a.md"), "---\nstatus: open\n---\n# A\n").unwrap();
+    r.git(&["add", "-A"]);
+    r.git(&["commit", "-qm", "notes"]);
+    let (code, map) = r.run("map", json!({"path": "notes/a.md"}), &[]);
+    assert_eq!(code, 0, "{map}");
+    let guard = map["collections"][0]["revision"].clone();
+    let (code, out) = r.run(
+        "update-item",
+        json!({"path": "notes/a.md", "collection": "notes", "guard": guard,
+               "set": {"status": "done"}, "message": "close note a"}),
+        &[],
+    );
+    assert_eq!(code, 0, "{out}");
+    let message = r.git(&["log", "-1", "--format=%B"]);
+    assert!(message.starts_with("close note a"), "{message}");
+    assert_eq!(message.matches("Rivet-Op:").count(), 1, "{message}");
+    assert_eq!(r.git(&["status", "--porcelain", "--", "notes/a.md"]), "");
+    assert_eq!(
+        r.git(&["show", "HEAD:notes/a.md"]),
+        "---\nstatus: done\n---\n# A\n"
+    );
+}

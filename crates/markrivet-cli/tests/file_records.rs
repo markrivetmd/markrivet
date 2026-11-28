@@ -1079,3 +1079,496 @@ fn an_excluded_file_is_no_move_endpoint() {
         s.refuses(request, "move_refused", Some(&format!("{field}_not_live")));
     }
 }
+
+// Record writes: `update-item` without `id` on a file record.
+
+/// The record guard `map` hands a writer for `path` in `collection`.
+fn record_guard(root: &Path, path: &str, collection: &str) -> String {
+    let (code, map) = rivet(root, "map", json!({"path": path}));
+    assert_eq!(code, 0, "{map}");
+    map["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == collection)
+        .unwrap_or_else(|| panic!("{path} is not in {collection}: {map}"))["revision"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn update(root: &Path, path: &str, set: Value) -> Value {
+    let guard = record_guard(root, path, "concepts");
+    let (code, out) = rivet(
+        root,
+        "update-item",
+        json!({"path": path, "collection": "concepts", "guard": guard, "set": set}),
+    );
+    assert_eq!(code, 0, "{out}");
+    out
+}
+
+/// What `get` answers for every stay id the file carries: where each one
+/// attaches, its unit's bytes and its revision.
+fn stays(root: &Path, path: &str) -> Vec<Value> {
+    let text = read(root, path);
+    text.match_indices("stay:")
+        .map(|(at, _)| {
+            let id: String = text[at + 5..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+                .collect();
+            let (code, got) = rivet(
+                root,
+                "get",
+                json!({"path": path, "select": {"kind": "id", "id": id}}),
+            );
+            assert_eq!(code, 0, "{got}");
+            got
+        })
+        .collect()
+}
+
+const RICH: &str = "bundle/rich.md";
+
+/// A BOM, CRLF, quoted keys, comments, a block mapping and no final newline.
+fn rich_text() -> String {
+    "\u{feff}---\r\n\"type\": Metric # what it is\r\n'status': 'draft'\r\n# about tags\r\ntags: [finance] # kept\r\nrank: 4\r\npinned: true\r\ngenerated:\r\n  by: agent # who\r\n  at: 2026-10-01T00:00:00Z\r\n---\r\n# Rich\r\n\r\nA body line.\r\n\r\n- [ ] one\r\n- [ ] two".to_string()
+}
+
+#[test]
+fn a_record_write_changes_exactly_its_keys() {
+    let root = records("file-records-write-bytes");
+    put(&root, RICH, &rich_text());
+    let (_, map) = rivet(&root, "map", json!({"path": RICH}));
+    let (code, out) = rivet(
+        &root,
+        "stamp",
+        json!({"path": RICH, "select": {"kind": "document"}, "guard": map["revision"]}),
+    );
+    assert_eq!(code, 0, "{out}");
+    let before = read(&root, RICH);
+    let ids = stays(&root, RICH);
+    assert!(ids.len() >= 3, "{ids:?}");
+    let out = update(
+        &root,
+        RICH,
+        json!({"status": "current", "generated_at": "2026-12-01T00:00:00Z",
+               "stale_after": "2027-01-01T00:00:00Z", "rank": null, "tags": ["finance", "a, b"]}),
+    );
+    let after = read(&root, RICH);
+    let want = before
+        .replace("'status': 'draft'", "'status': 'current'")
+        .replace("at: 2026-10-01T00:00:00Z", "at: 2026-12-01T00:00:00Z")
+        .replace("rank: 4\r\n", "")
+        .replace("tags: [finance] # kept", "tags: [finance, 'a, b'] # kept")
+        .replace(
+            "  at: 2026-12-01T00:00:00Z\r\n---",
+            "  at: 2026-12-01T00:00:00Z\r\nstale_after: 2027-01-01T00:00:00Z\r\n---",
+        );
+    assert_eq!(after, want);
+    let body = |s: &str| s[s.find("# Rich").unwrap()..].to_string();
+    assert_eq!(body(&after), body(&before), "the body is byte-exact");
+    assert_eq!(stays(&root, RICH), ids, "every stay keeps its attachment");
+    // The response hands back the next record guard, and nothing typed for
+    // a collection of items.
+    let op = &out["ops"][0];
+    assert_eq!(
+        op["revision"],
+        record_guard(&root, RICH, "concepts"),
+        "{out}"
+    );
+    assert!(
+        op.get("id").is_none() && op.get("collection_revision").is_none(),
+        "{out}"
+    );
+    let read = query(&root, json!({"collection": "concepts", "paths": [RICH]}));
+    assert_eq!(
+        read["items"][0]["fields"],
+        json!({"kind": "Metric", "status": "current", "stale_after": "2027-01-01T00:00:00Z",
+               "tags": ["finance", "a, b"], "pinned": true,
+               "generated_at": "2026-12-01T00:00:00Z"}),
+        "{read}"
+    );
+}
+
+const NOTE: &str = r#"{"id": "note", "version": 1, "item": "file", "fields": {
+  "status":       {"type": "enum",      "from": "key", "key": "status", "values": ["draft", "done"], "default": "draft"},
+  "owner":        {"type": "string",    "from": "key", "key": "owner"},
+  "due":          {"type": "date",      "from": "key", "key": "due"},
+  "generated_by": {"type": "string",    "from": "key", "key": "generated", "field": "by"},
+  "generated_at": {"type": "timestamp", "from": "key", "key": "generated", "field": "at"}}}"#;
+
+/// A second file collection, every field optional, over `notes/`.
+fn with_notes(root: &Path) {
+    let mut c = config(root);
+    c["collections"]["notes"] = json!({"schema": "note@1", "files": ["notes/*.md"]});
+    set_config(root, &c);
+    put(root, ".rivet/schemas/note.json", NOTE);
+}
+
+fn note(root: &Path, path: &str, set: Value) -> (i32, Value) {
+    let guard = record_guard(root, path, "notes");
+    rivet(
+        root,
+        "update-item",
+        json!({"path": path, "collection": "notes", "guard": guard, "set": set}),
+    )
+}
+
+#[test]
+fn record_writes_compose_their_key_edits_exactly() {
+    let root = records("file-records-compose");
+    with_notes(&root);
+    let cases = [
+        // Removing the last key and adding two: one replacement at the end.
+        (
+            "---\nowner: sam\ndue: 2026-12-01\n---\n# A\n",
+            json!({"due": null, "status": "done", "owner": "sam"}),
+            None,
+        ),
+        (
+            "---\nowner: sam\ndue: 2026-12-01\n---\n# A\n",
+            json!({"due": null, "status": "done", "owner": "kim"}),
+            Some("---\nowner: kim\nstatus: done\n---\n# A\n"),
+        ),
+        (
+            "---\ndue: 2026-12-01\nowner: sam\n# trailing\n# comments\n---\n# A\n",
+            json!({"owner": null, "status": "done"}),
+            Some("---\ndue: 2026-12-01\n# trailing\n# comments\nstatus: done\n---\n# A\n"),
+        ),
+        // Sibling mapping fields: one edit of their key, on a flow line.
+        (
+            "---\ngenerated: {by: agent, at: 2026-10-01T00:00:00Z} # g\nowner: sam\n---\n# A\n",
+            json!({"generated_by": "human:kim", "generated_at": "2026-12-01T00:00:00+13:00"}),
+            Some(
+                "---\ngenerated: {by: human:kim, at: 2026-12-01T00:00:00+13:00} # g\nowner: sam\n---\n# A\n",
+            ),
+        ),
+        // ... and on a block mapping, with standalone comments at the end.
+        (
+            "---\nowner: sam\ngenerated:\n  by: agent\n  # between\n  at: 2026-10-01T00:00:00Z\n# trailing\n---\n# A\n",
+            json!({"generated_by": "kim", "generated_at": "2026-12-01T00:00:00Z", "due": "2027-01-01"}),
+            Some(
+                "---\nowner: sam\ngenerated:\n  by: kim\n  # between\n  at: 2026-12-01T00:00:00Z\n# trailing\ndue: 2027-01-01\n---\n# A\n",
+            ),
+        ),
+        (
+            "---\nowner: sam\ngenerated:\n  by: agent\n  at: 2026-10-01T00:00:00Z\n---\n# A\n",
+            json!({"generated_by": "kim", "generated_at": "2026-12-01T00:00:00Z", "owner": null}),
+            Some("---\ngenerated:\n  by: kim\n  at: 2026-12-01T00:00:00Z\n---\n# A\n"),
+        ),
+    ];
+    for (n, (text, set, want)) in cases.into_iter().enumerate() {
+        let path = format!("notes/n{n}.md");
+        put(&root, &path, text);
+        let (code, out) = note(&root, &path, set.clone());
+        match want {
+            Some(want) => {
+                assert_eq!(code, 0, "{set}: {out}");
+                assert_eq!(read(&root, &path), want, "{set}");
+            }
+            None => {
+                // A current value is no edit; removing `due` and adding
+                // `status` still land.
+                assert_eq!(code, 0, "{set}: {out}");
+                assert_eq!(
+                    read(&root, &path),
+                    "---\nowner: sam\nstatus: done\n---\n# A\n",
+                    "{set}"
+                );
+            }
+        }
+    }
+    // Removing the last key while adding several: the added keys go in by
+    // key name, where the removed lines were, or after trailing comments.
+    for (n, (text, want)) in [
+        (
+            "---\ntype: Metric\nrank: 1\n---\n# A\n",
+            "---\ntype: Metric\npinned: false\nstatus: draft\ntags: [a, b]\n---\n# A\n",
+        ),
+        (
+            "---\ntype: Metric\nrank: 1\n# trailing\n---\n# A\n",
+            "---\ntype: Metric\n# trailing\npinned: false\nstatus: draft\ntags: [a, b]\n---\n# A\n",
+        ),
+        (
+            "---\r\ntype: Metric\r\nrank: 1 # r\r\n---\r\n# A",
+            "---\r\ntype: Metric\r\npinned: false\r\nstatus: draft\r\ntags: [a, b]\r\n---\r\n# A",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = format!("bundle/c{n}.md");
+        put(&root, &path, text);
+        update(
+            &root,
+            &path,
+            json!({"rank": null, "tags": ["a", "b"], "status": "draft", "pinned": false}),
+        );
+        assert_eq!(read(&root, &path), want);
+    }
+}
+
+/// A refusal leaves every file byte-identical and answers `code`.
+fn refuse_note(root: &Path, path: &str, guard: &str, set: Value, code: &str) -> Value {
+    refuse(
+        root,
+        "update-item",
+        json!({"path": path, "collection": "notes", "guard": guard, "set": set}),
+        code,
+    )
+}
+
+fn message(out: &Value) -> &str {
+    out["error"]["message"].as_str().unwrap()
+}
+
+#[test]
+fn every_record_write_refusal_leaves_the_file_byte_identical() {
+    let root = records("file-records-write-refusals");
+    with_notes(&root);
+    let g = record_guard(&root, MARGIN, "concepts");
+    let concepts =
+        |set: Value| json!({"path": MARGIN, "collection": "concepts", "guard": g, "set": set});
+    for (set, code, says) in [
+        (json!({"rank": "one"}), "invalid_item", "rank"),
+        (json!({"status": "bogus"}), "invalid_item", "status"),
+        (json!({"kind": null}), "invalid_item", "kind is required"),
+        (json!({"nope": 1}), "invalid_request", "nope is not a field"),
+        (
+            json!({"generated_at": null}),
+            "unsupported_syntax",
+            "never removed",
+        ),
+        (
+            json!({"verified": [{"by": "x"}]}),
+            "unsupported_syntax",
+            "entries",
+        ),
+        // An identical `entries` value is still a write of that form.
+        (
+            json!({"verified": [{"by": "human:sam", "at": "2026-11-02T10:00:00Z"}]}),
+            "unsupported_syntax",
+            "entries",
+        ),
+    ] {
+        let out = refuse(&root, "update-item", concepts(set.clone()), code);
+        assert!(message(&out).contains(says), "{set}: {out}");
+    }
+    let mut field = concepts(json!({"status": "retired"}));
+    field["guard_scope"] = json!("field");
+    refuse(&root, "update-item", field, "unsupported_syntax");
+    // A stale guard and a guard of another kind conflict, with `current`.
+    let (_, map) = rivet(&root, "map", json!({"path": MARGIN}));
+    let mut other = concepts(json!({"status": "retired"}));
+    other["guard"] = map["revision"].clone();
+    let out = refuse(&root, "update-item", other, "guard_conflict");
+    assert!(message(&out).contains("needs a record revision"), "{out}");
+    assert_eq!(out["error"]["current"], g.as_str(), "{out}");
+    put(&root, MARGIN, &MARGIN_TEXT.replace("rank: 1", "rank: 2"));
+    let out = refuse(
+        &root,
+        "update-item",
+        concepts(json!({"status": "retired"})),
+        "guard_conflict",
+    );
+    assert_eq!(
+        out["error"]["current"],
+        record_guard(&root, MARGIN, "concepts")
+    );
+    // A block list is read, not written, even with an identical value; a
+    // stale guard refuses first.
+    let churn = record_guard(&root, CHURN, "concepts");
+    for (tags, guard, code) in [
+        (
+            json!(["retention", "x"]),
+            churn.as_str(),
+            "unsupported_syntax",
+        ),
+        (json!(["retention"]), churn.as_str(), "unsupported_syntax"),
+        (json!(["retention"]), g.as_str(), "guard_conflict"),
+    ] {
+        refuse(
+            &root,
+            "update-item",
+            json!({"path": CHURN, "collection": "concepts", "guard": guard, "set": {"tags": tags}}),
+            code,
+        );
+    }
+    let out = refuse(
+        &root,
+        "update-item",
+        json!({"path": MARGIN, "collection": "concepts", "guard": g,
+               "set": {"verified": [{"by": "human:sam", "at": "2026-11-02T10:00:00Z"}]}}),
+        "guard_conflict",
+    );
+    assert!(message(&out).contains("changed since"), "{out}");
+    // An absent mapping parent, an absent field, an empty field value.
+    for (text, set, code) in [
+        (
+            "---\nowner: sam\n---\n",
+            json!({"generated_at": "2026-12-01T00:00:00Z"}),
+            "missing_selector",
+        ),
+        (
+            "---\ngenerated: {by: agent}\n---\n",
+            json!({"generated_at": "2026-12-01T00:00:00Z"}),
+            "missing_selector",
+        ),
+        (
+            "---\ngenerated: {by: agent, at: }\n---\n",
+            json!({"generated_at": "2026-12-01T00:00:00Z"}),
+            "unsupported_syntax",
+        ),
+        // An empty parent reads as absent, and holds no mapping to write.
+        (
+            "---\ngenerated:\nowner: sam\n---\n",
+            json!({"generated_at": "2026-12-01T00:00:00Z"}),
+            "unsupported_syntax",
+        ),
+        // An empty value is no single-line scalar to rewrite.
+        (
+            "---\nowner:\ndue: 2026-12-01\n---\n",
+            json!({"owner": "sam"}),
+            "unsupported_syntax",
+        ),
+        // Removing the only key would turn the fences into Markdown.
+        (
+            "---\nowner: sam\n---\n# A\n",
+            json!({"owner": null}),
+            "unsupported_syntax",
+        ),
+        (
+            "---\nowner: sam\ndue: 2026-12-01\n---\n",
+            json!({"owner": null, "due": null}),
+            "unsupported_syntax",
+        ),
+        // A record invalid before the edit is fixed with native key writes.
+        (
+            "---\nowner: sam\ndue: soon\n---\n",
+            json!({"owner": "kim"}),
+            "invalid_item",
+        ),
+        // No frontmatter, and frontmatter that does not read.
+        ("# Bare\n", json!({"owner": "kim"}), "unsupported_syntax"),
+        (
+            "---\nowner: !!str sam\n---\n",
+            json!({"owner": "kim"}),
+            "unsupported_syntax",
+        ),
+    ] {
+        put(&root, "notes/r.md", text);
+        let guard = record_guard(&root, "notes/r.md", "notes");
+        refuse_note(&root, "notes/r.md", &guard, set.clone(), code);
+    }
+    // A renamed record is gone: its old path's guard finds no file.
+    put(&root, "notes/old.md", "---\nowner: sam\n---\n");
+    let guard = record_guard(&root, "notes/old.md", "notes");
+    std::fs::rename(root.join("notes/old.md"), root.join("notes/new.md")).unwrap();
+    refuse_note(
+        &root,
+        "notes/old.md",
+        &guard,
+        json!({"owner": "kim"}),
+        "not_found",
+    );
+    // A checkbox collection takes no record write; a file record takes no
+    // typed insert.
+    let out = refuse(
+        &root,
+        "update-item",
+        json!({"path": WIDGETS, "collection": "actions", "guard": g, "set": {"done": true}}),
+        "invalid_request",
+    );
+    assert!(message(&out).ends_with("update_item names its item by exactly one of id and select"));
+}
+
+#[test]
+fn a_record_write_whose_values_are_current_is_unchanged() {
+    let root = records("file-records-noop");
+    let g = record_guard(&root, MARGIN, "concepts");
+    let set = json!({"status": "current", "tags": ["finance", "kpi"], "rank": 1,
+                     "generated_at": "2026-11-01T09:30:00+13:00", "reviewed": "2026-11-02"});
+    let (code, out) = rivet(
+        &root,
+        "update-item",
+        json!({"path": MARGIN, "collection": "concepts", "guard": g, "set": set}),
+    );
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(out["status"], "unchanged", "{out}");
+    assert_eq!(read(&root, MARGIN), MARGIN_TEXT);
+    put(
+        &root,
+        MARGIN,
+        &MARGIN_TEXT.replace("title: Gross margin", "title: GM"),
+    );
+    refuse(
+        &root,
+        "update-item",
+        json!({"path": MARGIN, "collection": "concepts", "guard": g, "set": set}),
+        "guard_conflict",
+    );
+}
+
+#[test]
+fn a_record_write_combines_with_body_ops_but_not_frontmatter_ops() {
+    let root = records("file-records-batch");
+    let g = record_guard(&root, MARGIN, "concepts");
+    let (_, got) = rivet(
+        &root,
+        "get",
+        json!({"path": MARGIN, "select": {"kind": "heading_path", "path": ["Gross margin"]}}),
+    );
+    let section = got["revision"].clone();
+    assert!(section.is_string(), "{got}");
+    let record = json!({"op": "update_item", "collection": "concepts", "guard": g,
+                        "set": {"status": "retired"}});
+    let body = json!({"op": "append", "select": {"kind": "heading_path", "path": ["Gross margin"]},
+                      "guard": section, "content": "Retired 2026-11-28."});
+    let (_, map) = rivet(&root, "map", json!({"path": MARGIN}));
+    let key = json!({"op": "add_key", "key": "note", "value": "x", "guard": map["revision"]});
+    let out = refuse(
+        &root,
+        "write",
+        json!({"path": MARGIN, "ops": [record.clone(), key]}),
+        "invalid_request",
+    );
+    assert!(message(&out).contains("same unit"), "{out}");
+    let (code, out) = rivet(
+        &root,
+        "write",
+        json!({"path": MARGIN, "ops": [record, body]}),
+    );
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        read(&root, MARGIN),
+        MARGIN_TEXT
+            .replace("status: current", "status: retired")
+            .replace(
+                "cost of goods.\n",
+                "cost of goods.\n\nRetired 2026-11-28.\n"
+            )
+    );
+}
+
+/// The record write § Record writes shows, on the fixture it names.
+#[test]
+fn the_documented_record_write_lands() {
+    let root = records("file-records-documented");
+    let out = update(
+        &root,
+        MARGIN,
+        json!({"status": "retired", "stale_after": "2027-06-30T00:00:00Z"}),
+    );
+    assert_eq!(out["status"], "applied", "{out}");
+    assert_eq!(
+        read(&root, MARGIN),
+        MARGIN_TEXT
+            .replace("status: current", "status: retired")
+            .replace(
+                "stale_after: 2026-12-31T00:00:00Z",
+                "stale_after: 2027-06-30T00:00:00Z"
+            )
+    );
+}

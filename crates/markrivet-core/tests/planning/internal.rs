@@ -846,3 +846,76 @@ fn planning_gate_scoped_stamp_excludes_headings_and_prose_and_rechecks_guards() 
         );
     }
 }
+
+fn record_bound(name: &str, schema: &[u8]) -> schema::Bound {
+    schema::bind_bytes(
+        name,
+        schema::CollectionConfig {
+            schema: "rec@1".into(),
+            files: vec!["**/*.md".into()],
+            exclude_files: vec![],
+            section: None,
+            level: None,
+            subsections: false,
+            exclude: vec![],
+            archive: vec![],
+        },
+        schema,
+    )
+    .unwrap()
+}
+
+const RECORD: &[u8] =
+    br#"{"id":"rec","version":1,"item":"file","fields":{"status":{"type":"string","from":"key","key":"status"}}}"#;
+const RECORD_SOURCE: &str = "---\nstatus: open\nowner: sam\n---\n# R\n";
+
+fn record_update(doc: &Document, bound: &schema::Bound) -> Change {
+    schema::plan_record_update(
+        &mut Planner::new(doc),
+        bound,
+        "r.md",
+        &schema::record_revision(doc, "r.md", bound),
+        GuardScope::Action,
+        &BTreeMap::from([("status".into(), json!("done"))]),
+    )
+    .unwrap()
+}
+
+/// A record change is authorized only by a record guard of its own binding
+/// and path: never a document or key guard, another binding's or another
+/// path's, each current for what it names.
+#[test]
+fn planning_gate_accepts_only_the_record_guard_for_a_record_change() {
+    let doc = Document::parse(RECORD_SOURCE).unwrap();
+    let a = record_bound("A", RECORD);
+    let b = record_bound("B", RECORD);
+    assert!(plan(&doc, vec![record_update(&doc, &a)]).is_ok());
+    let key = doc
+        .resolve(&Selector::FrontmatterKey {
+            key: "status".into(),
+        })
+        .unwrap();
+    for guard in [
+        Guard::new(GuardSubject::Native(Target::Document), &doc.revision()),
+        Guard::new(GuardSubject::Native(key), &doc.target_revision(key)),
+        Guard::new(
+            GuardSubject::Record {
+                bound: b.clone(),
+                path: "r.md".into(),
+            },
+            &schema::record_revision(&doc, "r.md", &b),
+        ),
+        Guard::new(
+            GuardSubject::Record {
+                bound: a.clone(),
+                path: "other.md".into(),
+            },
+            &schema::record_revision(&doc, "other.md", &a),
+        ),
+    ] {
+        let mut change = record_update(&doc, &a);
+        change.guard = Some(guard);
+        let error = plan(&doc, vec![change]).unwrap_err();
+        assert!(error.message.contains("guard subject"), "{error:?}");
+    }
+}
