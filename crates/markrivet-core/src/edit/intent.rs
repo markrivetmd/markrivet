@@ -22,6 +22,12 @@ pub(crate) enum GuardSubject {
         bound: schema::Bound,
         native: String,
     },
+    /// A file record's `record` revision: its frontmatter block, named by
+    /// the record's path.
+    Record {
+        bound: schema::Bound,
+        path: String,
+    },
 }
 
 pub(crate) struct Guard {
@@ -372,7 +378,9 @@ impl Guard {
                         && doc.target_revision(Target::Item { list: l, item: i }) == *native
                 })
             }
-            GuardSubject::Collection(_) | GuardSubject::CheckboxStamp { .. } => return None,
+            GuardSubject::Collection(_)
+            | GuardSubject::CheckboxStamp { .. }
+            | GuardSubject::Record { .. } => return None,
         };
         let holds = &holds;
         let mut found = doc.lists.iter().enumerate().flat_map(|(l, list)| {
@@ -409,6 +417,7 @@ impl Guard {
                 }
                 schema::collection_revision(doc, bound, &inst)
             }
+            GuardSubject::Record { bound, path } => schema::record_revision(doc, path, bound),
         };
         check_revision(&self.supplied, current)
     }
@@ -420,6 +429,7 @@ impl Guard {
                 !matches!(
                     expectation,
                     Expectation::Fields { .. }
+                        | Expectation::Record(_)
                         | Expectation::Stamp {
                             checkbox_only: true,
                             ..
@@ -449,6 +459,10 @@ impl Guard {
                     schema::instance(doc, bound)?.ok_or_else(|| invalid("collection is absent"))?;
                 matches!(expectation, Expectation::Stamp { scope: Target::Document, item_scopes: Some(spans), checkbox_only: true }
                     if *spans == inst.spans(doc))
+            }
+            GuardSubject::Record { bound, path } => {
+                matches!(expectation, Expectation::Record(r) if r.bound.same_binding(bound) && r.path == *path)
+                    && target == Target::Document
             }
         };
         covers
@@ -630,6 +644,8 @@ pub(crate) enum Expectation {
         inner: Box<Expectation>,
         fields: Box<schema::FieldExpectation>,
     },
+    /// Every key edit of one file-record write, re-derived from the request.
+    Record(Box<super::RecordExpectation>),
 }
 
 impl Expectation {
@@ -818,6 +834,7 @@ impl Expectation {
                 };
             }
             Self::Fields { inner, .. } => return inner.validate(doc, splices),
+            Self::Record(r) => return r.validate(doc, splices),
             _ => true,
         };
         valid.then_some(()).ok_or_else(|| {
@@ -841,7 +858,7 @@ impl Expectation {
             Self::Frontmatter { k, .. }
             | Self::DeletedKey { k, .. }
             | Self::SetKeyYaml { k, .. } => Target::FrontmatterKey(*k),
-            Self::NewKey { .. } | Self::AddKeyYaml { .. } => Target::Document,
+            Self::NewKey { .. } | Self::AddKeyYaml { .. } | Self::Record(_) => Target::Document,
             Self::AppendKeyItem { k, .. } => k.map_or(Target::Document, Target::FrontmatterKey),
             Self::InsertedItem { list, .. } | Self::Adoption { list, .. } => {
                 let l = doc
@@ -1036,6 +1053,7 @@ impl Expectation {
             Self::Move(m) => return m.allowed(doc),
             Self::Refresh(r) => return r.allowed(doc),
             Self::Fields { inner, .. } => return inner.allowed(doc),
+            Self::Record(r) => return r.allowed(doc),
         })
     }
 
@@ -1164,7 +1182,8 @@ impl Expectation {
             | Self::DeletedKey { .. }
             | Self::AddKeyYaml { .. }
             | Self::SetKeyYaml { .. }
-            | Self::AppendKeyItem { .. } => change.frontmatter = true,
+            | Self::AppendKeyItem { .. }
+            | Self::Record(_) => change.frontmatter = true,
             Self::InsertedItem { list, region, .. } => {
                 change.reshaped.insert(*list);
                 change.regions.push(*region);
@@ -1420,7 +1439,12 @@ impl Expectation {
         let Self::AppendKeyItem { key, others, .. } = self else {
             unreachable!("checked by append_write");
         };
-        spliced_frontmatter(doc, c, &write.splice, "append_key_item")?;
+        spliced_frontmatter(
+            doc,
+            c,
+            std::slice::from_ref(&write.splice),
+            "append_key_item",
+        )?;
         let fields = c.frontmatter.fields.as_ref().map_err(Clone::clone)?;
         if fields.len() != others.len() + 1
             || fields
@@ -1446,7 +1470,12 @@ impl Expectation {
             unreachable!("checked by yaml_write");
         };
         let fail = |m: &str| err(ErrorCode::InvalidContent, m);
-        spliced_frontmatter(doc, c, &write.splice, "the raw YAML write")?;
+        spliced_frontmatter(
+            doc,
+            c,
+            std::slice::from_ref(&write.splice),
+            "the raw YAML write",
+        )?;
         let fields = c.frontmatter.fields.as_ref().map_err(Clone::clone)?;
         let field = fields
             .iter()
@@ -1481,6 +1510,7 @@ impl Expectation {
         match self {
             yaml @ (Self::AddKeyYaml { .. } | Self::SetKeyYaml { .. }) => yaml.check_yaml(doc, c),
             append @ Self::AppendKeyItem { .. } => append.check_append(doc, c),
+            Self::Record(r) => r.check(doc, c),
             Self::Checkbox {
                 region,
                 expect,
@@ -1982,37 +2012,42 @@ fn preimage_section<'a>(
 }
 
 /// Everything up to the candidate's frontmatter end is the preimage's with
-/// exactly `splice` applied.
-fn spliced_frontmatter(
+/// exactly `splices` (sorted, disjoint, inside the frontmatter) applied.
+pub(super) fn spliced_frontmatter(
     doc: &Document,
     c: &Document,
-    splice: &Splice,
+    splices: &[Splice],
     what: &str,
 ) -> Result<(), Diagnostic> {
     let fm = doc
         .frontmatter
         .span
         .ok_or_else(|| invalid("frontmatter is absent"))?;
-    let span = splice.span;
-    let want = format!(
-        "{}{}{}",
-        &doc.source[fm.start..span.start],
-        splice.text,
-        &doc.source[span.end..fm.end]
-    );
+    let mut want = String::new();
+    let mut at = fm.start;
+    for splice in splices {
+        let span = splice.span;
+        if span.start < at || span.end > fm.end {
+            return Err(invalid("a frontmatter splice lies outside the frontmatter"));
+        }
+        want.push_str(&doc.source[at..span.start]);
+        want.push_str(&splice.text);
+        at = span.end;
+    }
+    want.push_str(&doc.source[at..fm.end]);
     let same = c.frontmatter.span.is_some_and(|s| {
         c.source[s.start..s.end] == want && c.source[..s.start] == doc.source[..fm.start]
     });
     if !same {
         return Err(err(
             ErrorCode::InvalidContent,
-            format!("the frontmatter would change beyond {what}'s own splice"),
+            format!("the frontmatter would change beyond {what}'s own splices"),
         ));
     }
     Ok(())
 }
 
-fn preserve_frontmatter(
+pub(super) fn preserve_frontmatter(
     c: &Document,
     others: &[(String, Value, String)],
     allow_comment_extension: bool,

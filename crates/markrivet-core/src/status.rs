@@ -39,10 +39,7 @@ fn run_with(
         config
             .collections
             .iter()
-            .filter(|(name, c)| {
-                schema::validate_binding_paths(name, c).is_ok()
-                    && schema::matches_file_patterns(&c.files, path)
-            })
+            .filter(|(name, c)| schema::validate_binding_paths(name, c).is_ok() && c.selects(path))
             .map(|(name, _)| name.clone())
             .collect()
     };
@@ -351,7 +348,7 @@ fn order<'a>(
 /// Unstamped collection items, as (line, item digest) per side.
 fn unstamped(doc: &Document, bound: &[&Bound]) -> Vec<(usize, String)> {
     let mut out = vec![];
-    for b in bound {
+    for b in bound.iter().filter(|b| !b.is_file()) {
         if let Ok(Some(inst)) = schema::instance(doc, b) {
             for &(list, item) in &inst.items {
                 let it = &doc.lists[list].items[item];

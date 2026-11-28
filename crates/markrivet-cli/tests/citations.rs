@@ -281,3 +281,74 @@ fn doctor_reports_a_stay_id_live_in_two_files() {
     std::fs::write(root.join(BETA), beta).unwrap();
     assert!(found(json!({})).1.is_empty());
 }
+
+/// A file binding over every Markdown file, its `exclude_files` keeping the
+/// archive out, changes no citation finding and no wait: the archive copy of
+/// a live id stays an archive copy rather than a second live carrier.
+#[test]
+fn a_file_binding_that_excludes_the_archive_changes_no_citation_or_wait() {
+    let gated = |root: &Path| {
+        std::fs::write(
+            root.join(BETA),
+            format!(
+                "# Beta
+
+## Action
+
+- [ ] **Beta** item.
+      **Gate**: item:Archived <!-- stay:BetaItem {SUB} -->
+- [ ] **Live** copy.
+      **Gate**: item:ItemOne1 <!-- stay:LiveCopy {SUB} -->
+- [ ] **Dup** again. <!-- stay:DupDupDu {SUB} -->
+"
+            ),
+        )
+        .unwrap();
+    };
+    let plain = setup("cite-plain", true);
+    gated(&plain);
+    let bound = setup("cite-file-binding", true);
+    gated(&bound);
+    let mut config: Value = serde_json::from_str(&read(&bound, ".rivet/project.json")).unwrap();
+    config["collections"]["pages"] =
+        json!({"schema": "page@1", "files": ["**/*.md"], "exclude_files": ["archive/**"]});
+    std::fs::write(bound.join(".rivet/project.json"), config.to_string()).unwrap();
+    std::fs::write(
+        bound.join(".rivet/schemas/page.json"),
+        r#"{"id": "page", "version": 1, "item": "file", "fields": {"title": {"type": "string", "from": "key", "key": "title"}}}"#,
+    )
+    .unwrap();
+    let findings = |root: &Path| -> Vec<Value> {
+        let (_, out) = rivet(root, "doctor", json!({"collection": "actions"}));
+        out["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| {
+                let code = d["code"].as_str().unwrap();
+                code.starts_with("citation_") || code.contains("duplicate")
+            })
+            .cloned()
+            .collect()
+    };
+    let want = findings(&plain);
+    assert!(!want.is_empty());
+    assert_eq!(findings(&bound), want);
+    assert_eq!(
+        cited(&bound, json!({"collection": "actions"})),
+        cited(&plain, json!({"collection": "actions"}))
+    );
+    let ready = |root: &Path| {
+        let (code, out) = rivet(
+            root,
+            "query",
+            json!({"collection": "actions", "ready": {"field": "gate", "include": ["ready", "waiting", "condition", "unlabelled", "unresolved"]}}),
+        );
+        assert_eq!(code, 0, "{out}");
+        out
+    };
+    let want = ready(&plain);
+    assert_eq!(want["readiness"]["ready"], 1, "{want}");
+    assert_eq!(want["readiness"]["waiting"], 1, "{want}");
+    assert_eq!(ready(&bound), want);
+}

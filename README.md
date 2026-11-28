@@ -21,7 +21,8 @@ editor opens, and a hand edit made anyway is never overwritten.
 
 Any document works: a plan, a handover, a changelog, a runbook, a task list.
 Checkbox lists can also be typed, so their items are queried and updated as
-records. The examples here use a task tracker, the busiest case.
+records, and so can a folder of files, one record per file, read from its
+frontmatter. The examples here use a task tracker, the busiest case.
 
 ## What works today
 
@@ -57,6 +58,23 @@ records. The examples here use a task tracker, the busiest case.
   fields and re-read them before committing. A title is optional, a label
   reads one line or, declared `multiline`, its continuation lines too, and
   ticking a checkbox changes one byte.
+- **File records**: a schema with `"item": "file"` makes each matched
+  Markdown file one record, its fields read from frontmatter keys (strings,
+  numbers, dates, timestamps compared by instant, flat lists, and entries
+  such as a `verified` list of `{by, at}`). `query` filters records, `doctor`
+  reports invalid ones, and `update-item` sets several keys and appends
+  entries in one change guarded by the frontmatter's revision; every other
+  byte of the file is kept.
+- **OKF bundles**: the concepts of an [Open Knowledge
+  Format](https://github.com/open-knowledge-format/open-knowledge-format)
+  v0.3 bundle bind as file records, so `query` finds concepts by `status` or
+  `stale_after`, and one `update-item` sets `stale_after` and appends a
+  `verified` entry. Checked against OKF's own `validate.py` and `scan.py` on
+  its `acme_retail` sample at commit `527e81a`: after the writes,
+  `validate.py` reported no new error or warning, `scan.py` moved trust tiers
+  only where a write changed `verified` or `generated.at`, and every concept
+  body and every other file in the bundle kept its bytes. Rivet reads and
+  writes the frontmatter; it does not compute trust tiers or create concepts.
 - **Frontmatter**: single-line scalars and calendar dates are read and
   written in place; empty values, lists and mappings are read as JSON. `set`
   refuses lists and mappings as targets. `add_key_yaml` and `set_key_yaml`

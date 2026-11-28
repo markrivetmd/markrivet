@@ -172,6 +172,7 @@ pub(crate) fn captured(
     let bound = schema::bind_with(&q.collection, |parts| {
         Ok(manifest.definitions.get(&parts.join("/")).cloned())
     })?;
+    bound.refuse_file()?;
     let declaration = if let Some(n) = &q.analytics {
         if !plain(n) {
             return Err(bad("malformed captured declaration name"));

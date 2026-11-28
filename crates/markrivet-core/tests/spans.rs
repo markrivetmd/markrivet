@@ -810,6 +810,8 @@ fn extreme_numeric_exponent_is_refused_without_overflow() {
         tags: vec![],
         label: Some("Number".into()),
         multiline: false,
+        key: None,
+        field: None,
         default: None,
     };
     let schema = Schema {

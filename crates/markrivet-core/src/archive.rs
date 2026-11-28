@@ -304,10 +304,13 @@ fn item_source(
         return Ok(ItemSource::Collection);
     }
     for (name, c) in &config.collections {
-        if !schema::matches_file_patterns(&c.files, source) {
+        if !c.selects(source) {
             continue;
         }
         let bound = schema::bind(project, name)?;
+        if bound.is_file() {
+            continue;
+        }
         if schema::instance(doc, &bound)?.is_some_and(|i| i.items.contains(&(list, item))) {
             return Ok(ItemSource::Collection);
         }
@@ -421,10 +424,13 @@ fn protected_overlap(
 ) -> Result<(), Diagnostic> {
     let config = schema::load_config(project)?;
     for (name, c) in &config.collections {
-        if !schema::matches_file_patterns(&c.files, source) {
+        if !c.selects(source) {
             continue;
         }
         let bound = schema::bind(project, name)?;
+        if bound.is_file() {
+            continue;
+        }
         if let Some(instance) = schema::instance(doc, &bound)? {
             let protected = doc.sections[instance.section].whole;
             if whole.start < protected.end && protected.start < whole.end {
@@ -587,10 +593,13 @@ fn binding(
     };
     let mut matched = Vec::new();
     for (name, collection) in &config.collections {
-        if !collection.files.iter().any(|g| schema::glob(g, source)) {
+        if !collection.selects(source) {
             continue;
         }
         let bound = schema::bind(project, name)?;
+        if bound.is_file() {
+            continue;
+        }
         if schema::instance(doc, &bound)?.is_some_and(|i| i.items.contains(&(list, item)))
             && collection.archive.iter().any(|g| schema::glob(g, path))
         {

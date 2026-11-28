@@ -720,6 +720,19 @@ fn map(
     let next = (offset + page.len() < total).then(|| format!("{revision}:{}", offset + page.len()));
     let mut collections = vec![];
     for bound in bound_for(project, path)? {
+        if bound.is_file() {
+            // The file is the record, and `map` hands a writer its guard.
+            let fields = schema::record(&doc, &bound);
+            collections.push(json!({
+                "name": bound.name,
+                "schema": bound.key,
+                "item": "file",
+                "valid": fields.is_ok(),
+                "errors": fields.err().map(|e| e.messages()),
+                "revision": schema::record_revision(&doc, path, &bound),
+            }));
+            continue;
+        }
         let entry = match schema::instance(&doc, &bound) {
             Ok(Some(inst)) => {
                 let invalid = inst
@@ -891,12 +904,15 @@ fn find(
     let (files, mut diagnostics) = match path {
         Some(path) => (vec![path], vec![]),
         None => {
-            let globs: Vec<String> = schema::load_config(project)?
+            let config = schema::load_config(project)?;
+            let globs: Vec<String> = config
                 .collections
-                .into_values()
-                .flat_map(|c| c.files)
+                .values()
+                .flat_map(|c| c.files.iter().cloned())
                 .collect();
-            schema::files(project, &globs)
+            let (mut files, diagnostics) = schema::files(project, &globs);
+            files.retain(|f| config.collections.values().any(|c| c.selects(f)));
+            (files, diagnostics)
         }
     };
     let limit = limit.unwrap_or(20).clamp(1, 1000);
@@ -1166,7 +1182,38 @@ fn write(
                             guard,
                             guard_scope,
                             set,
+                            append,
                         } => (|| {
+                            let bound = find(collection)?;
+                            if !bound.is_file() && !append.is_empty() {
+                                return Err(Diagnostic::new(
+                                    ErrorCode::InvalidRequest,
+                                    format!(
+                                        "collection {collection} holds checkbox items; append \
+                                         adds entries to file records only"
+                                    ),
+                                ));
+                            }
+                            if bound.is_file() {
+                                if id.is_some() || select.is_some() {
+                                    return Err(Diagnostic::new(
+                                        ErrorCode::InvalidRequest,
+                                        format!(
+                                            "collection {collection} holds file records, which \
+                                             are addressed by path; drop id and select"
+                                        ),
+                                    ));
+                                }
+                                return schema::plan_record_update(
+                                    &mut planner,
+                                    &bound,
+                                    path,
+                                    guard,
+                                    *guard_scope,
+                                    set,
+                                    append,
+                                );
+                            }
                             let locator = match (id, select) {
                                 (Some(id), None) => schema::ItemLocator::Id(id.clone()),
                                 (None, Some(Selector::Id { id })) => {
@@ -1175,14 +1222,18 @@ fn write(
                                 (None, Some(select @ Selector::Position { .. })) => {
                                     schema::ItemLocator::Position(select.clone())
                                 }
+                                // Neither: only a file record is named by its path.
                                 _ => {
                                     op.check_selectors()?;
-                                    unreachable!("check_selectors refuses every other shape")
+                                    return Err(Diagnostic::new(
+                                        ErrorCode::InvalidRequest,
+                                        crate::edit::UPDATE_ITEM_NAMING,
+                                    ));
                                 }
                             };
                             schema::plan_update(
                                 &mut planner,
-                                &find(collection)?,
+                                &bound,
                                 &locator,
                                 guard,
                                 *guard_scope,
@@ -1211,6 +1262,7 @@ fn write(
                         ErrorCode::CollectionConflict,
                         format!("the delete target is not an item of collection {collection:?}"),
                     ))?;
+                            bound.refuse_file()?;
                             planner.delete_in_collection(op, &bound)
                         })(),
                         Op::Set {
@@ -1471,12 +1523,18 @@ fn query(
     for clause in clauses {
         schema::check_clause(&bound.schema, clause)?;
     }
+    if bound.is_file() && ready.is_some() {
+        return Err(Diagnostic::new(
+            ErrorCode::InvalidRequest,
+            format!("collection {collection} holds file records, which have no ready waits"),
+        ));
+    }
     if let Some(r) = &ready {
         r.check(&bound.schema)?;
     }
     if let Some(fields) = &fields {
         for f in fields {
-            if f != "id" && !bound.schema.fields.contains_key(f) {
+            if (f != "id" || bound.is_file()) && !bound.schema.fields.contains_key(f) {
                 return Err(Diagnostic::new(
                     ErrorCode::InvalidRequest,
                     format!("{f} is not a field of {}", bound.schema.id),
@@ -1485,10 +1543,11 @@ fn query(
         }
     }
     let (mut files, mut diagnostics) = schema::files(project, &bound.config.files);
+    files.retain(|f| bound.config.selects(f));
     let every = files.clone();
     if let Some(only) = &paths {
         for p in only {
-            if !schema::matches_file_patterns(&bound.config.files, p) {
+            if !bound.config.selects(p) {
                 return Err(Diagnostic::new(
                     ErrorCode::InvalidRequest,
                     format!("{p} is not in collection {collection}"),
@@ -1565,6 +1624,31 @@ fn query(
         scanned += 1;
         digest.update(path.as_bytes());
         digest.update(doc.revision().as_bytes());
+        if bound.is_file() {
+            match schema::record(&doc, &bound) {
+                Err(e) => diagnostics.push(e.diagnostic().with_path(path.as_str())),
+                Ok(values) => {
+                    if clauses
+                        .iter()
+                        .all(|c| schema::matches_in(&bound.schema, &values, None, c))
+                    {
+                        let projected: Map<String, Value> = match &fields {
+                            Some(keep) => values
+                                .into_iter()
+                                .filter(|(k, _)| keep.contains(k))
+                                .collect(),
+                            None => values,
+                        };
+                        matched.push(json!({
+                            "path": path,
+                            "revision": schema::record_revision(&doc, path, &bound),
+                            "fields": projected,
+                        }));
+                    }
+                }
+            }
+            continue;
+        }
         let inst = match schema::instance(&doc, &bound) {
             Ok(Some(inst)) => inst,
             Ok(None) => continue,
@@ -1589,7 +1673,7 @@ fn query(
                 Ok(values) => {
                     if !clauses
                         .iter()
-                        .all(|c| schema::matches(&values, id.as_deref(), c))
+                        .all(|c| schema::matches_in(&bound.schema, &values, id.as_deref(), c))
                     {
                         continue;
                     }
@@ -1667,6 +1751,9 @@ fn query(
         "next_cursor": next,
         "diagnostics": diagnostics,
     });
+    if bound.is_file() {
+        body["item"] = json!("file");
+    }
     if ready.is_some() {
         body["readiness"] = json!(readiness);
         body["resolved_from"] = json!(extra);

@@ -313,6 +313,62 @@ each member heading and own body framed by length, excluding nonmember content.
 Query cursors and restore binding checks reuse the same fingerprint. Old typed
 guards conflict after upgrading; native revisions retain their inputs.
 
+A schema's `item` decides the binding's shape. `ItemShape::File` bindings carry
+`files` and `exclude_files` only (`CollectionConfig.section` is an `Option`, so
+a checkbox binding's serialized config and fingerprint keep their bytes), and
+their fingerprint is SHA-256 of compact JSON `["rivet-file-binding-v1", schema,
+files, exclude_files]`, both lists sorted and deduplicated. Membership is one
+predicate, `CollectionConfig::selects`: `files` matches and no `exclude_files`
+glob does. Every site deciding whether a path is in a collection asks it;
+archive-overlap validation and the walker's globs keep the raw patterns, which
+can only refuse or visit more. Citation scope classifies each found file with
+`ProjectConfig::live_member` (some collection selects it or a section archive's
+`files` match it), dropping a file only an `exclude_files` entry keeps out.
+A file record's fields come from `Source::Key`: a top-level frontmatter key read
+through `yaml::recognize`'s scalars, or one field of its one-level mapping, with
+a bare flat mapping read as a one-entry `entries` value. `schema::record`
+returns the fields or a `RecordError` (no frontmatter, unsupported frontmatter,
+or field errors). The `record` revision frames the record's path as identity
+and `doc.source[frontmatter.span]` as bytes, with the collection name, binding
+fingerprint and schema digest as dependencies. `schema::instance` refuses a file
+binding with `invalid_request`, so a checkbox-only reader that misses its
+`is_file()` check fails loudly instead of reporting a missing heading; sites
+that iterate a path's bindings (collection stamping, archive source checks,
+move membership, status) skip file bindings first.
+
+A record write (`update_item` on a file binding) is one change, not a batch of
+native key ops, which could not share a frontmatter. `record_edits` derives
+every splice from the preimage and the request alone, through the renderers
+and shape checks the native key ops use (`scalar_token`, `mapping_field_token`,
+`key_token_site` with `yaml_set` for a flow list, `new_key_line` and `yaml_add`,
+`frontmatter_key_lines` for a removal, `yaml_append` for an appended entry): one
+edit per touched key inside its own lines, sibling mapping fields composed on
+their key's lines and re-read as one mapping, an append where
+`append_key_item` would put it, and added keys (an appended-to absent key among
+them) merged into one insertion at the payload end by key name. Zero-width
+inserts at one offset merge into one, appends to existing keys first, and are
+coalesced with a removal ending or starting there into one replacement. A field whose stored
+value equals the request is left alone (`null` equals only an absent key, so a
+present empty or `null` key is removed), so a request of current values has no
+splice. The candidate payload is read back before planning returns.
+`Expectation::Record` carries the request (binding, path, `set`, `append`) and the
+expected fields, and re-derives the splices at every stage: `allowed` returns
+exactly their spans, `validate` requires the change's splices to equal them in
+span and text before a candidate is built (which refuses a byte-equivalent
+forgery that containment and the candidate comparison would accept), and the
+candidate check requires every byte before the frontmatter unchanged, the
+frontmatter equal to the preimage's with exactly those splices applied, its keys
+in the derived order with the derived values, every untouched key's value and
+source lines kept (a removed key's trailing comments may extend its
+predecessor), and `schema::record` re-reading the expected fields. The body is
+left to the batch's other expectations and the whole-candidate checks, so a
+record write and a body op combine; `change.frontmatter` keeps any other
+frontmatter op out of the batch. Its guard subject is `GuardSubject::Record`,
+the `record` revision at the write's path, which authorizes only a
+`Expectation::Record` of the same binding and path; a native document or key
+guard never authorizes one. The follow-up guard is the candidate's `record`
+revision.
+
 Guard scope for typed writes is `action` (the whole item) by default and the
 only accepted value. `field` is reserved: it would need a field revision plus
 schema, binding and structural dependencies, and whole-item invariant checks
@@ -894,7 +950,7 @@ selector semantics on one immutable parsed document per selected path. It
 resolves binding and schema bytes before file reads, caches shared schema bytes,
 and fingerprints those inputs. Membership counters include invalid items and
 checked records; physical keys are `(path, list_index, item_index)`, independent
-of stay ids. Explicit requested paths are accounted for independently of
+of stay ids, and a file record is keyed by its path alone. Explicit requested paths are accounted for independently of
 directory discovery. One observed walk covers all live and archive binding
 globs, with requested paths left out of pruning. Discovered counts filter its
 files against selected live globs, keeping their whole-binding meaning; raw

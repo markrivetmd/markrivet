@@ -275,12 +275,7 @@ pub(crate) fn capture(
     }
     let live: Vec<_> = all
         .iter()
-        .filter(|p| {
-            config
-                .collections
-                .values()
-                .any(|c| c.files.iter().any(|g| schema::glob(g, p)))
-        })
+        .filter(|p| config.collections.values().any(|c| c.selects(p)))
         .cloned()
         .collect();
     let policy: Vec<_> = all

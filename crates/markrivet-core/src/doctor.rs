@@ -111,12 +111,17 @@ pub struct Readiness {
 #[derive(Serialize)]
 pub struct ItemReport {
     pub collection: String,
+    /// `"file"` for a file record; absent for a checkbox item, whose entry
+    /// keeps its bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
     pub path: String,
-    pub list_index: usize,
-    pub item_index: usize,
+    /// `null` for a file record, which is a whole file rather than a list item.
+    pub list_index: Option<usize>,
+    pub item_index: Option<usize>,
     pub line: usize,
     pub id: Option<String>,
-    pub checked: bool,
+    pub checked: Option<bool>,
     pub valid: bool,
     pub addressing: &'static str,
     pub readiness: Readiness,
@@ -664,18 +669,11 @@ pub fn run_with(
         .collect();
     if let Some(paths) = &paths {
         for path in paths {
-            if !selected
-                .values()
-                .any(|c| schema::matches_file_patterns(&c.files, path))
-            {
+            if !selected.values().any(|c| c.selects(path)) {
                 return invalid("requested path does not match any selected collection binding");
             }
         }
-        selected.retain(|_, config| {
-            paths
-                .iter()
-                .any(|path| schema::matches_file_patterns(&config.files, path))
-        });
+        selected.retain(|_, config| paths.iter().any(|path| config.selects(path)));
     }
     let mut bindings: BTreeMap<String, Bound> = BTreeMap::new();
     let mut schema_bytes: BTreeMap<String, Result<Vec<u8>, Diagnostic>> = BTreeMap::new();
@@ -764,7 +762,7 @@ pub fn run_with(
         .collect();
     let discovered: Vec<String> = scope_files
         .iter()
-        .filter(|(path, _)| schema::matches_file_patterns(&globs, path))
+        .filter(|(path, _)| selected.values().any(|c| c.selects(path)))
         .map(|(path, _)| path.clone())
         .collect();
     // Coverage gaps are decided before any file is read; informational
@@ -773,8 +771,7 @@ pub fn run_with(
     for event in &events {
         traversal_gap(&mut scan, event, &globs);
     }
-    let matching =
-        |path: &str, name: &str| schema::matches_file_patterns(&selected[name].files, path);
+    let matching = |path: &str, name: &str| selected[name].selects(path);
     let discovered: BTreeSet<_> = discovered.into_iter().collect();
     let requested: BTreeSet<_> = paths.clone().unwrap_or_default().into_iter().collect();
     let files: BTreeSet<_> = if paths.is_some() {
@@ -906,7 +903,11 @@ pub fn run_with(
                             "correct marker attachment, identity or unsupported source syntax",
                         );
                     }
-                    let membership = inspect_membership(&mut scan, &observed, bound, &path, ci);
+                    let membership = if bound.is_file() {
+                        inspect_record(&mut scan, &observed, bound, &path, ci)
+                    } else {
+                        inspect_membership(&mut scan, &observed, bound, &path, ci)
+                    };
                     if let Some(m) = membership
                         && scan.charge(&m)
                     {
@@ -1205,6 +1206,92 @@ fn excluded_entry(scan: &mut Scan, event: &WalkEvent, globs: &[String]) {
     );
 }
 
+/// One file record: a whole member file, so no heading, sections, stamp or
+/// carrier applies. Its findings are `invalid_item` only.
+fn inspect_record(
+    scan: &mut Scan,
+    observed: &ObservedDocument<'_>,
+    bound: &Bound,
+    path: &str,
+    ci: usize,
+) -> Option<Membership> {
+    let doc = observed.document;
+    let name = bound.name.as_str();
+    // Counted once per path, whichever record collections bind it.
+    scan.physical
+        .insert((path.to_string(), usize::MAX, usize::MAX));
+    scan.report.summary.items += 1;
+    scan.report.collections[ci].coverage.items += 1;
+    let fields = schema::record(doc, bound);
+    let valid = fields.is_ok();
+    if valid {
+        scan.report.summary.valid += 1;
+        scan.report.collections[ci].coverage.valid += 1;
+    } else {
+        scan.report.summary.invalid += 1;
+        scan.report.collections[ci].coverage.invalid += 1;
+    }
+    let readable = !matches!(
+        fields,
+        Err(schema::RecordError::NoFrontmatter | schema::RecordError::Unsupported(_))
+    );
+    if let Err(e) = &fields {
+        let span = match e {
+            schema::RecordError::Unsupported(d) => d.span,
+            _ => doc.frontmatter.span,
+        };
+        for message in e.messages() {
+            let mut d = Diagnostic::new(ErrorCode::InvalidItem, message);
+            if let Some(span) = span {
+                d = d.with_span(span);
+            }
+            scan.finding(
+                "invalid_item",
+                "error",
+                (Some(name), Some(path), Some(observed)),
+                d,
+                "supply frontmatter values that satisfy the bound schema",
+            );
+        }
+    }
+    let report = ItemReport {
+        collection: name.to_string(),
+        kind: Some("file"),
+        path: path.to_string(),
+        list_index: None,
+        item_index: None,
+        line: 1,
+        id: None,
+        checked: None,
+        valid,
+        addressing: "resolvable",
+        readiness: Readiness {
+            stamp: "not_applicable",
+            current_carrier: "not_applicable",
+            rewrite_prerequisites: if readable { "clear" } else { "blocked" },
+            checkbox: "not_applicable",
+            checkbox_field: None,
+            document_prerequisite: if doc.write_blocker.is_some() {
+                "blocked"
+            } else {
+                "clear"
+            },
+            typed_update: "not_checked",
+            typed_update_reason: "no replacement fields supplied; a record write is checked against its frontmatter when it is planned",
+        },
+    };
+    if scan.charge(&report) {
+        scan.report.items.push(report);
+    }
+    Some(Membership {
+        collection: name.to_string(),
+        heading: "not_applicable",
+        member_sections: vec![],
+        excluded_sections: vec![],
+        unselected_sections: vec![],
+    })
+}
+
 fn inspect_membership(
     scan: &mut Scan,
     observed: &ObservedDocument<'_>,
@@ -1223,7 +1310,7 @@ fn inspect_membership(
                     "missing_heading",
                     Diagnostic::new(
                         ErrorCode::NotFound,
-                        format!("bound heading {:?} is missing", bound.config.section),
+                        format!("bound heading {:?} is missing", bound.config.section()),
                     ),
                 ),
                 Err(d) => ("ambiguous", "ambiguous_heading", d),
@@ -1449,12 +1536,13 @@ fn inspect_membership(
         }
         let report = ItemReport {
             collection: name.to_string(),
+            kind: None,
             path: path.to_string(),
-            list_index: li,
-            item_index: ii,
+            list_index: Some(li),
+            item_index: Some(ii),
             line: observed.file_line(item.span.start),
             id,
-            checked: item.checkbox.expect("collection shape").checked,
+            checked: Some(item.checkbox.expect("collection shape").checked),
             valid,
             addressing,
             readiness,

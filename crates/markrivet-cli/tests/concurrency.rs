@@ -8973,3 +8973,87 @@ fn single_path_recovery_refuses_a_moved_target_a_changed_policy_and_an_unbindabl
         );
     }
 }
+
+const RECORD: &str = "notes/a.md";
+const RECORD_TEXT: &str = "---\nstatus: open\nowner: sam\n---\n# A\n\nBody.\n";
+
+/// The tracker example plus a file collection holding one record.
+fn record_project(name: &str) -> (std::path::PathBuf, String) {
+    let root = project(name);
+    let config = root.join(".rivet/project.json");
+    let mut c: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    c["collections"]["notes"] = json!({"schema": "note@1", "files": ["notes/*.md"]});
+    std::fs::write(&config, c.to_string()).unwrap();
+    std::fs::write(
+        root.join(".rivet/schemas/note.json"),
+        r#"{"id": "note", "version": 1, "item": "file", "fields": {
+          "status": {"type": "enum", "from": "key", "key": "status", "values": ["open", "done"]},
+          "owner": {"type": "string", "from": "key", "key": "owner"}}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("notes")).unwrap();
+    std::fs::write(root.join(RECORD), RECORD_TEXT).unwrap();
+    let (code, map) = rivet(&root, "map", json!({"path": RECORD}));
+    assert_eq!(code, 0, "{map}");
+    let guard = map["collections"][0]["revision"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (root, guard)
+}
+
+fn record_write(guard: &str, set: Value) -> Value {
+    json!({"path": RECORD, "collection": "notes", "guard": guard, "set": set})
+}
+
+#[test]
+fn a_record_writer_holding_the_lock_wins_and_the_stale_one_refuses() {
+    let (root, guard) = record_project("record-stale");
+    let pause = Pause::new(&root, "planned");
+    let first = spawn(
+        &root,
+        "update-item",
+        &record_write(&guard, json!({"status": "done", "owner": "kim"})),
+        &[pause.env()],
+    );
+    pause.wait();
+    // B starts with the same guard and waits on A's lock.
+    let second = spawn(
+        &root,
+        "update-item",
+        &record_write(&guard, json!({"owner": "lee"})),
+        &[],
+    );
+    pause.release();
+    let (ca, ra) = finish(first);
+    let (cb, rb) = finish(second);
+    assert_eq!(ca, 0, "{ra}");
+    assert_eq!(cb, 2, "{rb}");
+    assert_eq!(rb["error"]["code"], "guard_conflict", "{rb}");
+    assert_eq!(rb["error"]["current"], ra["ops"][0]["revision"], "{rb}");
+    assert_eq!(
+        read(&root, RECORD),
+        "---\nstatus: done\nowner: kim\n---\n# A\n\nBody.\n"
+    );
+}
+
+#[test]
+fn an_outside_edit_during_a_record_write_is_kept() {
+    let (root, guard) = record_project("record-external");
+    let pause = Pause::new(&root, "planned");
+    let writer = spawn(
+        &root,
+        "update-item",
+        &record_write(&guard, json!({"status": "done"})),
+        &[pause.env()],
+    );
+    pause.wait();
+    // An editor that ignores the lock saves while Rivet holds it.
+    let edited = RECORD_TEXT.replace("Body.", "Edited in an editor.");
+    std::fs::write(root.join(RECORD), &edited).unwrap();
+    pause.release();
+    let (code, out) = finish(writer);
+    assert_eq!(code, 2, "{out}");
+    assert_eq!(out["error"]["code"], "external_change", "{out}");
+    assert_eq!(read(&root, RECORD), edited, "the outside edit is preserved");
+}

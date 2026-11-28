@@ -69,7 +69,9 @@ fn namespaces(
                 format!("{path} matches an archive namespace"),
             ));
         }
-        if !schema::matches_file_patterns(&config.live_patterns(), path) {
+        // Live by membership, so a file only an `exclude_files` entry keeps
+        // out of its collection is no endpoint.
+        if !config.live_member(path) {
             return Err(refused(live, format!("{path} matches no live namespace")));
         }
     }
@@ -140,6 +142,16 @@ fn plan_move(
                     "source or destination is not bound to the requested collection",
                 )
             };
+            if let Some(name) = request
+                .collection
+                .as_ref()
+                .filter(|n| state.file_collections.contains(*n))
+            {
+                return Err(Diagnostic::new(
+                    ErrorCode::InvalidRequest,
+                    format!("collection {name} holds file records, not checkbox items"),
+                ));
+            }
             let bound = state
                 .source
                 .iter()
@@ -1017,6 +1029,19 @@ impl MoveReceipt {
         }
         let state = move_config(project, &config, &self.source.path, &self.destination.path)
             .map_err(|e| ("config_changed", e.detail()))?;
+        // The digest covers the raw live globs but not `exclude_files`, so an
+        // exclusion added since the move was planned is caught here: a path
+        // those globs still match that no binding selects any more.
+        let live = config.live_patterns();
+        if [&self.source.path, &self.destination.path]
+            .iter()
+            .any(|p| crate::schema::matches_file_patterns(&live, p) && !config.live_member(p))
+        {
+            return Err((
+                "config_changed",
+                "a move endpoint is no longer in a live namespace".into(),
+            ));
+        }
         if state.digest != self.config_sha256 || state.bindings != self.bindings {
             return Err((
                 "config_changed",
@@ -1028,8 +1053,12 @@ impl MoveReceipt {
 }
 
 struct MoveConfig {
+    /// Checkbox bindings only: file records are not move units.
     source: Vec<crate::schema::Bound>,
     destination: Vec<crate::schema::Bound>,
+    /// File collections binding either endpoint, named so a move that asks
+    /// for one is refused by shape.
+    file_collections: std::collections::BTreeSet<String>,
     bindings: Vec<Binding>,
     digest: String,
 }
@@ -1043,6 +1072,14 @@ fn move_config(
     let mut paths = crate::schema::bound_paths(project, config, &[a, b])?;
     let destination = paths.pop().expect("destination");
     let source = paths.pop().expect("source");
+    let file_collections = source
+        .iter()
+        .chain(&destination)
+        .filter(|b| b.is_file())
+        .map(|b| b.name.clone())
+        .collect();
+    let source: Vec<_> = source.into_iter().filter(|b| !b.is_file()).collect();
+    let destination: Vec<_> = destination.into_iter().filter(|b| !b.is_file()).collect();
     let mut bindings: Vec<Binding> = source
         .iter()
         .chain(&destination)
@@ -1064,6 +1101,7 @@ fn move_config(
     Ok(MoveConfig {
         source,
         destination,
+        file_collections,
         bindings,
         digest,
     })

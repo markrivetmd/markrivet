@@ -1146,8 +1146,15 @@ def test_orientation_subset() -> None:
     # (copied whole); it does not send the agent to `find`. § `delete` lists
     # the structural writes that refuse a position, a protocol list again,
     # and its next step names only `set` and `stamp`, both in engine.
-    reviewed = {"engine": "1300a84873c6427c", "minimal": "d72baadd459bb6e0",
-                "minimal-find": "a4213886315d9539"}
+    # § File records and § Record writes name key writes (`add_key`,
+    # `set_key_field`, `delete_key`, `set_key_yaml`, `append_key_item`) in the
+    # "As" column of the record-write table and in prose, as the native
+    # operation a record edit matches, never as a next step; `append` and `set`
+    # there are update-item's request fields, `status` is a frontmatter key,
+    # and `doctor`, `find`, `move` and `create` appear in scope and refusal
+    # lists. None sends an agent to a command the cut leaves out.
+    reviewed = {"engine": "a1ca2de0d5d9f0c0", "minimal": "38a7f2526c2b431a",
+                "minimal-find": "02c267f96d36b0fa"}
     saved = pilot.FULL_GUIDE
     try:
         pilot.FULL_GUIDE = ("## A\nUse `append` or `commit-pending` next.\n"

@@ -186,15 +186,15 @@ The report has these fields:
 | `config_fingerprint`, `collections[].binding_fingerprint`, `collections[].schema_fingerprint` | SHA-256 fingerprints of config bytes, normalized binding JSON and schema bytes observed by this invocation; absent source has a null fingerprint. |
 | `complete`, `ok`, `status`, `health`, `counts` | Complete diagnosis is `ok: true`, `status: "read"`, `counts: "exact"` and health `healthy`, `warning` or `unhealthy`. Incomplete diagnosis is `ok: false`, `status: "incomplete"`, health `unknown` and `counts: "lower_bound"`. |
 | `summary`, `collections[].coverage` | Unique-file coverage globally, per-collection coverage and membership item counts, including valid/invalid, missing/unresolvable ids, excluded/unselected items and diagnostic counts by severity as `errors`, `warnings` and `informational`. |
-| `unique_items` | Physical items keyed by path, list index and item index, independent of ids or overlapping membership. |
-| `files` | One result per selected physical file, with `status` `parsed` or `failed`, source revision when read, and membership results whose `heading` is `found`, `missing` or `ambiguous`, with member/excluded/unselected sections. |
+| `unique_items` | Physical items keyed by path, list index and item index, independent of ids or overlapping membership; a file record counts once per path. |
+| `files` | One result per selected physical file, with `status` `parsed` or `failed`, source revision when read, and membership results whose `heading` is `found`, `missing` or `ambiguous`, with member/excluded/unselected sections, or `not_applicable` with empty section lists for a file record. |
 | `traversal_events` | Every walker observation for the checked bindings, in the same form as `analyze`'s `events`: pruned prefixes, policy exclusions, non-UTF-8 names with their reversible hex, and enumeration errors with their scope. |
-| `items` | One detail per collection membership, with physical coordinates, id, checked state, validity, `addressing` (`resolvable`, `missing_id` or `unresolvable`) and structural readiness. No item body or extracted values. |
+| `items` | One detail per collection membership, with physical coordinates, id, checked state, validity, `addressing` (`resolvable`, `missing_id` or `unresolvable`) and structural readiness. No item body or extracted values. A file record's entry adds `kind: "file"` and has `list_index`, `item_index`, `id` and `checked` null, `line: 1` and `addressing: "resolvable"`; its `stamp`, `current_carrier` and `checkbox` readiness are `not_applicable`, and `rewrite_prerequisites` is `blocked` when the file has no frontmatter or it does not read. A record's only findings are `invalid_item` and its collection's `zero_files`. |
 | `diagnostics` | Stable rule code, severity, collection, path, item id where available, source line/column, revision, message, next action and optional original-byte carrier blocker. A `stamp_blocked` finding carries the affected item's line and no column; a `carrier_blocked` finding carries the blocker's line and column and the affected marker's `id`. In both, `blocker` carries the blocker's own line, column and byte offset. |
 | `carrier_groups` | Carrier failures grouped by path and original byte offset, with affected membership and physical-item counts. |
 | `omitted_detail` | The report limit that stops detail retention and further scanning, or null. |
 
-`files_discovered` counts every file matching the checked bindings (with
+`files_discovered` counts every file the checked bindings select (with
 `paths`, only bindings matching a requested path) before restricting to
 requested files; `files_requested` and `files_selected` count unique requested
 and selected paths. Successfully read/parsed and failed file counts remain
@@ -409,7 +409,9 @@ first.
 Lists report `items`, `checkbox_items` and `stamped_items`. `collections`
 lists every bound collection this file matches, with its `revision`, and,
 for a binding that takes subsections, the title path of each member
-subsection under `subsections`.
+subsection under `subsections`. A file record's entry is `{name, schema,
+item: "file", valid, errors, revision}`, where `errors` is null for a valid
+record and `revision` is the record guard a writer needs.
 `truncated` and `next_cursor` page the outline; a cursor from an older
 revision is refused with `stale_cursor`. `map` never returns content.
 
@@ -509,7 +511,8 @@ the titles from below the bound section down to the one holding the item, `[]`
 for the bound section's own body. The guard for inserting into a file's
 collection comes from `map` (`collections[].revision`) or the previous typed
 write (`collection_revision`). Operators: `eq`, `ne`, `in`, `lt`, `lte`, `gt`,
-`gte` (strings, dates and numbers), `exists`, `missing`, `contains` (strings).
+`gte` (strings, dates and numbers; timestamps by instant), `exists`, `missing`,
+`contains` (strings, and a list's elements).
 The pseudo-field `id` selects by stay id. A clause whose value does not fit the
 field's type is refused (a date must be a real calendar date, an enum value one
 of its `values`); nothing is coerced. Numbers compare exactly, at any size.
@@ -521,6 +524,13 @@ that reads but does not decode or parse guards it by its bytes. Invalid
 items, items no selector names, unreadable files and unlistable directories
 appear in `diagnostics`; they never vanish silently. An unstamped item with a
 position `select` is not a diagnostic.
+
+On a collection of file records (§ File records) each item is `{path,
+revision, fields}`, with `revision` the record guard and no `id`, `select`,
+`addressing` or `line`, and the response carries `"item": "file"`. `ready`, the
+`id` pseudo-field and `id` in `fields` are refused with `invalid_request`, and
+so is a `paths` entry the collection does not select, an excluded file
+included. An invalid record is a diagnostic, as an invalid item is.
 
 #### Ready work
 
@@ -648,6 +658,7 @@ second-preimage resistance.
 | `frontmatter` | one top-level key's source lines, including its mapping or list | `get`, `write` |
 | `action` | one typed item, plus the collection name, canonical binding fingerprint and schema digest | `get` and `find` (`typed`), `query`, typed writes |
 | `collection` | a collection's section heading and own body, plus its binding fingerprint and schema digest; with `subsections`, each member section's heading and own body | `map`, typed writes |
+| `record` | a file record's frontmatter block, opening fence through the closing fence's line terminator (BOM excluded, empty without frontmatter), identified by the record's path, plus the collection name, binding fingerprint and schema digest | `map`, `query` |
 
 Typed item and collection revisions include one versioned binding fingerprint:
 SHA-256 of compact JSON `["rivet-binding-v1", schema, files, section, level,
@@ -658,6 +669,13 @@ binding setting conflicts even when the item remains a member. Schema-file
 bytes retain their separate digest. Guards from engines predating this
 fingerprint refuse `guard_conflict` on an unchanged valid binding; re-read
 after upgrading. Native guards retain their byte-identical contract.
+
+A file binding has its own fingerprint, SHA-256 of compact JSON
+`["rivet-file-binding-v1", schema, files, exclude_files]` with both lists
+sorted and deduplicated, so adding one leaves every checkbox guard as it was. A
+`record` guard does not conflict on a body edit, and conflicts on any
+frontmatter change: a key outside the schema, a comment line, or the binding or
+schema changing.
 
 A section guard covers its descendants, so editing an item conflicts with a
 stale guard on any section above it. It never conflicts with a guard on a
@@ -678,8 +696,9 @@ named by position (below):
 Recover by reading the unit again, deciding whether the change still makes
 sense, and retrying with the fresh guard. A successful `set`, a stamped
 `insert` and every typed write return the next guard in `ops[n].revision`
-(typed writes also return `collection_revision`), so a follow-up edit needs
-no re-read. `write` always returns the new document `revision`.
+(typed item writes also return `collection_revision`; a record write returns
+the record's next `record` revision and no collection revision), so a
+follow-up edit needs no re-read. `write` always returns the new document `revision`.
 
 A write through a position handle (§ Selectors) is checked the same way: under
 the writer lock, the item at that place must still have the guarded revision
@@ -975,8 +994,10 @@ equals-delimited and multiline injection variants.
 
 `move` transfers one native, stayed checkbox item or section subtree between two existing live
 documents. It requires per-write commits with `on_dirty: refuse`. Both paths
-must already be canonical, distinct, match a live collection or section-history
-glob, and match no archive glob.
+must already be canonical, distinct, be selected by a collection (its `files`
+match and no `exclude_files` glob does; § File records) or match a
+section-history glob, and match no archive glob. Recovery checks both paths
+again.
 
 ```json
 {"source":"tracking/TRACKING_WIDGETS.md","id":"<stay id>",
@@ -1903,9 +1924,10 @@ A request carrying `op` is refused with `invalid_request` (*drop "op" from the
 request*), and one without `path` with *missing field `path`*; neither touches
 the file.
 
-`update-item` names its item by exactly one of `id` and `select`, where
-`select` is a position handle or an id selector; both, neither, or another
-selector kind is `invalid_request`. By position, the item needs no stay:
+On a checkbox collection, `update-item` names its item by exactly one of `id`
+and `select`, where `select` is a position handle or an id selector; both,
+neither, or another selector kind is `invalid_request`. A file record is named
+by `path` alone (§ Record writes). By position, the item needs no stay:
 
 ```sh
 echo '{"path": "tracking/TRACKING_WIDGETS.md", "collection": "actions",
@@ -1945,6 +1967,97 @@ write if any field reads back differently from what was asked, naming each field
 that moved and what it re-read as. A title ending in `(YYYY-MM-DD)` is refused
 before that, when the schema has a `title_date` field: the date would read back
 as that field, so pass it there.
+
+#### Record writes
+
+On a file collection (§ File records), `update-item` takes `path`,
+`collection`, `guard`, `set` and optionally `append`, and no `id` or `select`,
+either of which is `invalid_request`: the record is the file `path` names, and
+the guard is its `record` revision, as `query` and `map` return it.
+
+```sh
+echo '{"path": "bundle/margin.md", "collection": "concepts", "guard": "<record revision>",
+       "set": {"status": "retired", "stale_after": "2027-06-30T00:00:00Z"}}' | markrivet update-item
+```
+
+`append` adds one flat mapping of scalars to each `entries` field it names, in
+the same change as `set`, so recording a verification and pushing
+`stale_after` out is one guarded write:
+
+```sh
+echo '{"path": "bundle/margin.md", "collection": "concepts", "guard": "<record revision>",
+       "set": {"stale_after": "2027-06-30T00:00:00Z"},
+       "append": {"verified": {"by": "human:sam", "at": "2026-11-22T10:00:00Z"}}}' | markrivet update-item
+```
+
+Every field in `set` and every entry in `append` is written in one change,
+guarded by that one revision,
+and `ops[0].revision` is the record's next `record` revision; there is no `id`
+and no `collection_revision`. Inside `write` the record write is a frontmatter
+change: it combines with body ops in the same batch (a log entry beside the
+status change) and is refused beside any other frontmatter op, as two
+frontmatter ops are. Each field is written as the native key op for its form
+writes it:
+
+| Field state | `set` value | Bytes written | As |
+| --- | --- | --- | --- |
+| key holds a single-line scalar | a scalar | the value token, quote style kept where it still reads back | `set` |
+| key absent | a scalar or a list | a new `key: value` line | `add_key`, `add_key_yaml` |
+| key holds a single-line flow list (`list`) | an array of strings | the token, as `[a, b]` with each element plain where it reads back and quoted otherwise | `set_key_yaml` |
+| key holds a block list (`list`) | an array | refused `unsupported_syntax` | |
+| key holds an empty value (scalar types) | a scalar | refused `unsupported_syntax` | `set` |
+| `field` source, parent and field present | a scalar | the field's token; sibling fields of one key are one edit of its lines | `set_key_field` |
+| `field` source, parent key or field absent | a scalar | refused `missing_selector` | `set_key_field` |
+| `field` source, parent key or field empty | a scalar | refused `unsupported_syntax` | `set_key_field` |
+| key present, `key` source | `null` | the key's lines, leaving trailing standalone comments | `delete_key` |
+| key absent | `null` | nothing | |
+| `field` source | `null` | refused `unsupported_syntax` | |
+| `entries` | anything | refused `unsupported_syntax`: append to it | |
+
+An appended entry is written as `append_key_item` writes it (§
+`append_key_item`): into a single-line flow sequence after its last entry, or
+as a new entry after a block sequence's last line, in the form, key order and
+quote style of the entry before it; or, when the key is absent, as a new
+`key: [{...}]` line among the added keys. Its item rules and refusals are that
+op's: a nonempty mapping of scalars with plain key names (`invalid_request`
+otherwise), values that render on one line, and a sequence `append_key_item`
+appends to (`unsupported_syntax` otherwise, an empty `verified:` and a flow
+sequence spread over lines included). A bare mapping, which reads as one entry,
+is refused `unsupported_syntax` naming the list form: `append` never rewrites
+it into a list. `append` on a checkbox collection, naming a field the schema
+does not have or one that does not hold `entries`, or naming a field `set` also
+names, is `invalid_request`. An append always writes, so a request that appends
+is never `unchanged`.
+
+A collection where a scalar type reads, or a scalar or list where a `field`
+source reads a mapping, makes the record invalid, which is refused before any field's form is
+looked at (below).
+
+Added keys go in as one insertion at the end of the frontmatter, after any
+trailing standalone comment lines, in key-name order, an appended-to absent key
+among them. Removing the last key while adding others puts them where its lines
+were, or after the comments that followed it. An append to a block sequence
+that is the last key goes in before the added keys, and before any trailing
+comments; one whose next key the same request removes goes in where that key's
+lines were, leaving the comments after them. A write that would leave no key is refused
+`unsupported_syntax`, as `delete_key` refuses deleting the last one.
+
+The checks run in a fixed order, and each refusal leaves the file
+byte-identical: a field the schema does not have, an `append` field that does
+not hold `entries` or one `set` also names (`invalid_request`), or
+`guard_scope: "field"` (`unsupported_syntax`); the guard (`guard_conflict`); a
+file with no frontmatter or frontmatter that does not read
+(`unsupported_syntax`); a record invalid before the edit (`invalid_item`: fix it
+with native key writes); each field's form, by the table, whatever the value,
+and each appended entry's item and sequence (above); each value's type
+(`invalid_item`, which `null` on a required field also is). Then a request
+whose values all equal the stored ones and that appends nothing writes nothing
+and answers `unchanged`. A stored value is compared before defaults, so setting an
+absent key to its default adds the key, and `null` equals only an absent key:
+a present `key:` or `key: null` is removed. An unwritable form or a stale guard
+refuses even when every value is current. The written frontmatter must read
+back as the preimage's with exactly the planned edits and the record must
+re-read as asked, or nothing is written.
 
 ## Stays and evidence
 
@@ -2926,7 +3039,7 @@ tracker that `status` reports.
 ## Typed collections
 
 `.rivet/project.json` binds a collection to a schema, a set of files and a
-section title:
+section title (a collection of file records takes no section; § File records):
 
 ```json
 {"collections": {"actions": {
@@ -3013,8 +3126,9 @@ echo '{"path": "tracking/TRACKING_LEGACY.md", "collection": "actions",
 # - [ ] **Chase the missing invoice (2026-09-14)** From last month.
 ```
 
-Types are `string`, `boolean`, `number`, `date` (a real calendar date) and
-`enum` (with `values`). Only checkbox items of lists in the section's own
+Types are `string`, `boolean`, `number`, `date` (a real calendar date),
+`enum` (with `values`) and `timestamp` (§ File records gives its grammar).
+Only checkbox items of lists in the section's own
 body, above its subsections, are members, unless the binding takes
 subsections:
 
@@ -3053,6 +3167,96 @@ holding the collection's pruned items. They are read only to resolve a
 check, a write's `dangling_citations`), never listed, written or stamped
 through the collection.
 
+### File records
+
+A schema whose `item` is `"file"` makes each matched Markdown file one record,
+with every field read from a top-level frontmatter key:
+
+```json
+{"id": "concept", "version": 1, "item": "file", "fields": {
+  "kind":         {"type": "string",    "from": "key", "key": "type", "required": true},
+  "status":       {"type": "enum",      "from": "key", "key": "status", "values": ["draft", "current", "retired"]},
+  "stale_after":  {"type": "timestamp", "from": "key", "key": "stale_after"},
+  "tags":         {"type": "list",      "from": "key", "key": "tags"},
+  "generated_at": {"type": "timestamp", "from": "key", "key": "generated", "field": "at"},
+  "verified":     {"type": "entries",   "from": "key", "key": "verified"}}}
+```
+
+```json
+{"collections": {"concepts": {
+  "schema": "concept@1", "files": ["bundle/**/*.md"],
+  "exclude_files": ["**/index.md", "**/log.md"]}}}
+```
+
+An Open Knowledge Format (OKF) v0.3 bundle binds this way, one concept per
+file with its `index.md` and `log.md` files excluded, under a schema of its own:
+OKF's `status` values are `draft`, `stable` and `deprecated`, so the schema
+above would read its concepts as invalid. On OKF's `acme_retail` sample at
+commit `527e81a`, record writes through such a binding left OKF's
+`validate.py` with no new error or warning and moved its `scan.py` trust tiers
+only where a write changed `verified` or `generated.at`.
+
+The binding takes `files` and `exclude_files` only. A member is a `.md` or
+`.markdown` file that `files` matches and no `exclude_files` glob matches, in
+the same glob grammar, and nothing is excluded by default. An excluded file is
+in no collection anywhere: `query` and `doctor` do not read it, pathless `find`
+does not search it, a write naming the collection refuses it as "not in
+collection", and the prune snapshot's live scope and citation scope leave it
+out. `section`, `level`, `subsections`, `exclude` or `archive` on a file
+binding is `invalid_schema`, and so is `exclude_files` on a checkbox binding or
+a checkbox binding without `section`. A literal `exclude_files` entry follows
+the literal-binding rule above.
+
+`from: "key"` is the only source a file schema takes, and a checkbox schema
+refuses it. `key` names a top-level key; `field` reads one immediate scalar
+field of that key's one-level mapping (`generated: {by: agent, at: ...}`).
+Key and field names follow `add_key`'s rule. Two fields may not read the same
+key and field, and one key may not be read both whole and through a field.
+`tags`, `label` and `multiline` do not apply to a key field, and `id` stays
+reserved.
+
+| Type | Reads | `field` | `where` operators |
+| --- | --- | --- | --- |
+| `string`, `boolean`, `number`, `date`, `enum` | as for checkbox items, with no coercion: `yes` is not `true`, and a `string` field reads a date or timestamp as its text | yes | as for checkbox items |
+| `timestamp` | `YYYY-MM-DDTHH:MM:SS`, an optional fraction of one to nine digits, then `Z` or `±HH:MM`, with a calendar date, hours 00-23 and minutes and seconds 00-59 | yes | `eq`, `ne`, `in`, `lt`, `lte`, `gt`, `gte` by instant; `exists`, `missing` |
+| `list` | a flat sequence of strings, flow or block (`tags: [a, b]`); `[]` is an empty list | no | `contains` (an element equals the string), `exists`, `missing` |
+| `entries` | a sequence of flat mappings of scalars, flow or block (`verified`); a bare flat mapping reads as one entry | no | `exists`, `missing` |
+
+`timestamp` is available to checkbox schemas too, where a label can hold one.
+Uppercase `T` and `Z` only: lowercase `t` or `z`, a space separator, a missing
+offset and `24:00` are not timestamps, and nothing is coerced into one. Equal
+instants in different offsets are equal, so `2026-12-31T23:00:00-05:00` is
+after `2026-12-31T20:00:00Z`, and a value returns as its source text. An absent
+key, an empty value (`key:`) and `null` all read as absent, so `default`
+(scalar types only) and `required` apply as they do for labels.
+
+A member is an invalid record when a value has the wrong type, a `field`
+source's key holds no mapping, the file has no frontmatter, or its frontmatter
+does not read (§ Supported syntax and limits). `query` reports each as an
+`invalid_item` diagnostic, with the frontmatter reader's message and span in the
+last case, and does not list it; `doctor` reports it as `invalid_item` beside
+any `unsupported_frontmatter` finding. Exclude a file such as an index that is
+not a record rather than leave it invalid.
+
+A record is named by its project-relative path. It carries no stay id, and a
+file renamed outside Rivet is a different record: a query cursor taken before
+the rename is `stale_cursor`. Its guard is the `record` revision (§ Revisions
+and guards), which `query` and `map` return, and the guard `update-item` writes
+a record under (§ Record writes). Every checkbox-only command refuses a file
+collection with `invalid_request` naming the shape, leaving the file
+byte-identical: `update-item` with an `id` or `select` (a record is addressed
+by path), `insert-item`, `delete` and `set` with the collection, the
+checkbox-only `stamp`, `move`, `revert-item`, `analyze`, `export` and `query`
+with `ready`. `item-log` still reads history, with `restore_guard: null` and
+that refusal as `restore_diagnostic`. A file bound by a checkbox and a file
+collection at once reads, stamps and writes on its checkbox side exactly as it
+does without the file binding: `stamp {select: collections}` and `create` with
+`stamp: true` stamp checkbox collections only.
+
+An engine that predates file records refuses a project holding a file binding
+with `invalid_schema` for anything that loads the configuration, so install the
+new engine before adding one.
+
 ## Supported syntax and limits
 
 - CommonMark with task list items, parsed by comrak 0.55. GFM tables are
@@ -3063,7 +3267,8 @@ through the collection.
   - **Read and written**: single-line scalars, being strings, JSON numbers,
     `true`/`false`/`null`, and a calendar date (`updated: 2026-09-06`, a YAML
     timestamp rather than a JSON type). A date reads as its own text and
-    writes back unquoted, so `updated` keeps the shape the file had.
+    writes back unquoted, so `updated` keeps the shape the file had. A
+    timestamp (`2026-12-31T00:00:00Z`) reads as its own text too.
     Strings matching YAML 1.1 booleans (`y`, `n`, `yes`, `no`, `on`, `off`,
     `true`, `false`, in any capitalization) or null spellings (`~`, `null`,
     in any capitalization, or an empty string) are quoted when written, so
@@ -3204,6 +3409,42 @@ build, so the script does not show one. The response to one is either
 `status: "uncertain"`. In both cases `get` the unit and compare it with what
 you meant to write before doing anything else.
 
+## Records walkthrough
+
+Run it with `bash examples/records/walkthrough.sh` (set `RIVET` if the binary
+is not on `PATH`). The example is a synthetic bundle with one record per file
+(§ File records): the schema and binding shown there, four concepts under
+`bundle/`, and an `index.md` and `log.md` the binding excludes. The script
+copies it to a scratch directory and checks every result. Abbreviated:
+
+```sh
+C=bundle/metrics/shelf-turnover.md
+
+# 0. Diagnose the records; the index and the log are excluded, no bytes change.
+echo '{"collection": "concepts"}' | markrivet doctor
+
+# 1. Records gone stale before 2027 and not retired: one, with its record guard.
+echo '{"collection": "concepts",
+       "where": [{"field": "stale_after", "op": "lt", "value": "2027-01-01T00:00:00Z"},
+                 {"field": "status", "op": "ne", "value": "retired"}],
+       "fields": ["status", "stale_after"]}' | markrivet query
+
+# 2. map hands a writer the same guard.
+echo "{\"path\": \"$C\"}" | markrivet map
+
+# 3. Make it current, push stale_after out and record the check, in one write.
+#    Only those three lines of the frontmatter change.
+echo '{"path": "bundle/metrics/shelf-turnover.md", "collection": "concepts",
+       "guard": "<record revision>",
+       "set": {"status": "current", "stale_after": "2027-06-30T00:00:00Z"},
+       "append": {"verified": {"by": "human:wren", "at": "2026-11-28T09:00:00Z"}}}' | markrivet update-item
+
+# 4. Query again: nothing is stale, and the record reads both verified entries.
+# 5. Replaying the old guard exits 2 with guard_conflict and error.current.
+# 6. A bare verified mapping reads as one entry; append to it is refused
+#    unsupported_syntax and the file is left as it was.
+```
+
 ## Not implemented
 
 These are design directions, not features:
@@ -3220,6 +3461,10 @@ These are design directions, not features:
   `append_key_item`'s, editing or removing a frontmatter list item, and
   mapping field paths deeper than one parent and one scalar field.
 - Token counts. Sizes are reported in bytes; no tokenizer is bundled.
+- Typed record creation (`insert-item` on a file collection; `create` writes a
+  new file), record writes that add a missing mapping or mapping field, replace
+  a block list or set an `entries` field, and archives, `ready` waits and
+  moves for file records (§ File records, § Record writes).
 - General directory creation (`archive-mkdir` creates confined archive parents),
   and adding frontmatter to a document that has none.
 

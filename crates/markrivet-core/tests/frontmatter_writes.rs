@@ -1168,3 +1168,328 @@ fn append_key_item_forged_splices_are_rejected_by_the_intent_gate() {
         }
     }
 }
+
+// File-record writes: one change carrying every key edit, checked at the
+// intent gate against the splices its request derives.
+
+const RECORD_SCHEMA: &[u8] = br#"{"id": "rec", "version": 1, "item": "file", "fields": {
+  "status": {"type": "string",    "from": "key", "key": "status"},
+  "rank":   {"type": "number",    "from": "key", "key": "rank"},
+  "tags":   {"type": "list",      "from": "key", "key": "tags"},
+  "by":     {"type": "string",    "from": "key", "key": "generated", "field": "by"},
+  "at":     {"type": "timestamp", "from": "key", "key": "generated", "field": "at"},
+  "verified": {"type": "entries", "from": "key", "key": "verified"}}}"#;
+
+fn record_binding() -> markrivet_core::schema::Bound {
+    markrivet_core::schema::bind_bytes(
+        "recs",
+        markrivet_core::schema::CollectionConfig {
+            schema: "rec@1".into(),
+            files: vec!["**/*.md".into()],
+            exclude_files: vec![],
+            section: None,
+            level: None,
+            subsections: false,
+            exclude: vec![],
+            archive: vec![],
+        },
+        RECORD_SCHEMA,
+    )
+    .unwrap()
+}
+
+fn plan_record(doc: &Document, set: &Value) -> Result<edit::Change, Diagnostic> {
+    plan_record_append(doc, set, &json!({}))
+}
+
+fn plan_record_append(
+    doc: &Document,
+    set: &Value,
+    append: &Value,
+) -> Result<edit::Change, Diagnostic> {
+    let bound = record_binding();
+    let guard = markrivet_core::schema::record_revision(doc, "r.md", &bound);
+    let set = serde_json::from_value(set.clone()).unwrap();
+    let append = serde_json::from_value(append.clone()).unwrap();
+    markrivet_core::schema::plan_record_update(
+        &mut Planner::new(doc),
+        &bound,
+        "r.md",
+        &guard,
+        markrivet_core::GuardScope::Action,
+        &set,
+        &append,
+    )
+}
+
+const RECORD_SOURCE: &str = "---\nstatus: 'old' # note\nrank: 1\ngenerated: {by: agent, at: 2026-10-01T00:00:00Z}\ntags: [a]\n---\n# T\n\nBody.\n";
+
+/// Plan the record write, let `forge` alter its splices, and return what the
+/// planning gate says. The unforged change must land, as a control.
+fn forged_record(
+    source: &str,
+    set: Value,
+    forge: impl Fn(&str, &mut Vec<markrivet_core::edit::Splice>),
+) -> Diagnostic {
+    let doc = Document::parse(source).unwrap();
+    assert!(edit::plan(&doc, vec![plan_record(&doc, &set).unwrap()]).is_ok());
+    let mut change = plan_record(&doc, &set).unwrap();
+    forge(source, &mut change.splices);
+    edit::plan(&doc, vec![change]).unwrap_err()
+}
+
+fn span_of(source: &str, text: &str) -> markrivet_core::Span {
+    let start = source.find(text).unwrap();
+    markrivet_core::Span {
+        start,
+        end: start + text.len(),
+    }
+}
+
+/// Each forgery re-reads with every requested value decoded as asked.
+#[test]
+fn a_forged_record_change_is_refused_by_the_intent_gate() {
+    let set = json!({"status": "new", "at": "2026-12-01T00:00:00Z", "tags": ["a", "b"]});
+    let token = |splices: &mut Vec<markrivet_core::edit::Splice>, old: &str| -> usize {
+        let at = span_of(RECORD_SOURCE, old);
+        splices.iter().position(|s| s.span == at).unwrap()
+    };
+    type Forge = Box<dyn Fn(&str, &mut Vec<markrivet_core::edit::Splice>)>;
+    let forgeries: Vec<(&str, Forge)> = vec![
+        // A comment changed beside the value.
+        (
+            "comment",
+            Box::new(move |source, splices| {
+                let i = token(splices, "'old'");
+                splices[i].span = span_of(source, "'old' # note");
+                splices[i].text = "'new' # changed".into();
+            }),
+        ),
+        // Whitespace added after the value.
+        (
+            "whitespace",
+            Box::new(move |_, splices| {
+                let i = token(splices, "'old'");
+                splices[i].text = "'new'  ".into();
+            }),
+        ),
+        // An untouched mapping sibling requoted, decoding the same.
+        (
+            "sibling",
+            Box::new(move |source, splices| {
+                let i = token(splices, "2026-10-01T00:00:00Z");
+                splices[i].span.start = span_of(source, "agent").start;
+                splices[i].text = "\"agent\", at: 2026-12-01T00:00:00Z".into();
+            }),
+        ),
+        // A body splice riding on the record change.
+        (
+            "body",
+            Box::new(move |source, splices| {
+                let at = span_of(source, "Body.").end;
+                splices.push(markrivet_core::edit::Splice {
+                    span: markrivet_core::Span { start: at, end: at },
+                    text: " More.".into(),
+                });
+            }),
+        ),
+        // A splice extent moved: the flow list's closing bracket rewritten
+        // from outside the token.
+        (
+            "extent",
+            Box::new(move |source, splices| {
+                let i = token(splices, "[a]");
+                let span = span_of(source, "[a]\n");
+                splices[i].span = span;
+                splices[i].text = "[a, b]\n".into();
+            }),
+        ),
+    ];
+    for (name, forge) in forgeries {
+        let error = forged_record(RECORD_SOURCE, set.clone(), forge);
+        assert!(
+            matches!(
+                error.code,
+                ErrorCode::InvalidRequest | ErrorCode::InvalidContent
+            ),
+            "{name}: {error:?}"
+        );
+    }
+}
+
+/// `'old'` -> `'new'` planned as the whole token, forged as `old` -> `new`
+/// inside the quotes: the same bytes, inside the allowed span, so only the
+/// exact comparison with the derived splices refuses it.
+#[test]
+fn a_byte_equivalent_record_forgery_is_refused_by_the_splice_comparison() {
+    let error = forged_record(
+        RECORD_SOURCE,
+        json!({"status": "new"}),
+        |source, splices| {
+            let [one] = splices.as_mut_slice() else {
+                panic!("{splices:?}")
+            };
+            let quoted = span_of(source, "'old'");
+            assert_eq!(one.span, quoted);
+            one.span = markrivet_core::Span {
+                start: quoted.start + 1,
+                end: quoted.end - 1,
+            };
+            one.text = "new".into();
+        },
+    );
+    assert_eq!(error.code, ErrorCode::InvalidRequest, "{error:?}");
+    assert!(
+        error
+            .message
+            .contains("exactly the splices its request derives"),
+        "{error:?}"
+    );
+}
+
+/// The native key ops plan what they did before the renderer factoring.
+#[test]
+fn native_key_ops_plan_what_record_writes_share() {
+    let source = "---\nstatus: 'old' # note\nrank: 1\ngenerated: {by: agent, at: 2026-10-01T00:00:00Z}\n---\n# T\n";
+    let doc = Document::parse(source).unwrap();
+    let record = plan_record(
+        &doc,
+        &json!({"status": "new", "at": "2026-12-01T00:00:00Z", "rank": null}),
+    )
+    .unwrap();
+    let set_op = run(
+        source,
+        Op::Set {
+            collection: None,
+            typed_guard: None,
+            select: Selector::FrontmatterKey {
+                key: "status".into(),
+            },
+            guard: guard(source, "status"),
+            part: None,
+            content: json!("new"),
+            allow_drop: false,
+        },
+    )
+    .unwrap()
+    .candidate;
+    assert_eq!(set_op, source.replace("'old'", "'new'"));
+    let field = set(source, "at", json!("2026-12-01T00:00:00Z"))
+        .unwrap()
+        .candidate;
+    assert_eq!(field, source.replace("2026-10-01", "2026-12-01"));
+    let removed = delete(source, "rank").unwrap().candidate;
+    assert_eq!(removed, source.replace("rank: 1\n", ""));
+    // The record write makes those same three edits in one change.
+    let out = edit::plan(&doc, vec![record]).unwrap().candidate;
+    assert_eq!(
+        out,
+        source
+            .replace("'old'", "'new'")
+            .replace("2026-10-01", "2026-12-01")
+            .replace("rank: 1\n", "")
+    );
+}
+
+/// A combined record change (a `set`, an append to a block sequence and the
+/// removal of the key after it, coalesced into one replacement) with its
+/// splices forged so the values still decode as asked: each is refused at
+/// the intent gate. Splitting the coalesced replacement back into an insert
+/// and a removal writes the same bytes, so only the exact comparison with
+/// the derived splices refuses it.
+#[test]
+fn a_forged_combined_append_is_refused_by_the_intent_gate() {
+    let source = "---\nstatus: old\nverified:\n  - {by: agent, at: 2026-10-01T00:00:00Z} # v\nrank: 1\n# kept\ntags: [a]\n---\n# T\n\nBody.\n";
+    let set = json!({"status": "new", "rank": null});
+    let append = json!({"verified": {"by": "kim", "at": "2026-12-01T00:00:00Z"}});
+    let doc = Document::parse(source).unwrap();
+    let planned = plan_record_append(&doc, &set, &append).unwrap();
+    let landed = edit::plan(&doc, vec![planned]).unwrap().candidate;
+    assert_eq!(
+        landed,
+        source
+            .replace("status: old", "status: new")
+            .replace("rank: 1\n", "  - {by: kim, at: 2026-12-01T00:00:00Z}\n")
+    );
+    let entry = "  - {by: kim, at: 2026-12-01T00:00:00Z}\n";
+    let rank = span_of(source, "rank: 1\n");
+    let coalesced = move |splices: &mut Vec<edit::Splice>| -> usize {
+        splices.iter().position(|s| s.span == rank).unwrap()
+    };
+    type Forge = Box<dyn Fn(&mut Vec<edit::Splice>)>;
+    let forgeries: Vec<(&str, Forge)> = vec![
+        // The entry respaced, decoding the same.
+        (
+            "spacing",
+            Box::new(move |splices| {
+                let i = coalesced(splices);
+                splices[i].text = "  - { by: kim, at: 2026-12-01T00:00:00Z }\n".into();
+            }),
+        ),
+        // The existing entry's comment dropped by widening the splice.
+        (
+            "comment",
+            Box::new(move |splices| {
+                let i = coalesced(splices);
+                splices[i].span.start -= " # v\n".len();
+                splices[i].text = format!("\n{entry}");
+            }),
+        ),
+        // The entry inserted after the standalone comment instead.
+        (
+            "extent",
+            Box::new(move |splices| {
+                let i = coalesced(splices);
+                splices[i].span.end += "# kept\n".len();
+                splices[i].text = format!("# kept\n{entry}");
+            }),
+        ),
+        // The same bytes as an insert and a removal: not the derived list.
+        (
+            "split",
+            Box::new(move |splices| {
+                let i = coalesced(splices);
+                let at = rank.start;
+                splices[i].text = String::new();
+                splices.insert(
+                    i,
+                    edit::Splice {
+                        span: markrivet_core::Span { start: at, end: at },
+                        text: entry.into(),
+                    },
+                );
+            }),
+        ),
+        // A body splice riding along.
+        (
+            "body",
+            Box::new(move |splices| {
+                let at = span_of(source, "Body.").end;
+                splices.push(edit::Splice {
+                    span: markrivet_core::Span { start: at, end: at },
+                    text: " More.".into(),
+                });
+            }),
+        ),
+    ];
+    for (name, forge) in forgeries {
+        let mut change = plan_record_append(&doc, &set, &append).unwrap();
+        forge(&mut change.splices);
+        let error = edit::plan(&doc, vec![change]).unwrap_err();
+        assert!(
+            matches!(
+                error.code,
+                ErrorCode::InvalidRequest | ErrorCode::InvalidContent
+            ),
+            "{name}: {error:?}"
+        );
+        if name == "split" {
+            assert!(
+                error
+                    .message
+                    .contains("exactly the splices its request derives"),
+                "{error:?}"
+            );
+        }
+    }
+}
