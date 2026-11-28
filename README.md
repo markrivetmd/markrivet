@@ -1,5 +1,11 @@
 # markrivet
 
+[![ci](https://github.com/markrivetmd/markrivet/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/markrivetmd/markrivet/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![MSRV 1.89](https://img.shields.io/badge/MSRV-1.89-orange.svg)](Cargo.toml)
+
+Site: [markrivet.dev](https://markrivet.dev)
+
 Concurrent, guarded updates to the Markdown files agents share, by agents that
 all use markrivet (Rivet for short).
 
