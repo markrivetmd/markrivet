@@ -938,6 +938,30 @@ pub(crate) fn render_mapping_field(
     })
 }
 
+/// A flat flow sequence of strings, `[a, b]`: each element rendered by the
+/// candidates `set` tries (plain where it reads back inside the brackets,
+/// else quoted), and the whole token read back through `raw_token`.
+pub(crate) fn render_flow_list(items: &[Value]) -> Option<String> {
+    let rendered = items
+        .iter()
+        .map(|v| {
+            v.as_str()?;
+            let one = Value::Array(vec![v.clone()]);
+            render_scalar_with("Plain", v, |t| {
+                raw_token(&format!("[{t}]")) == Some(one.clone())
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let token = format!("[{}]", rendered.join(", "));
+    (raw_token(&token) == Some(Value::Array(items.to_vec()))).then_some(token)
+}
+
+/// One field's source lines read as a mapping or sequence, by the reader's
+/// own rules: the value it decodes to, or `None` when it does not read.
+pub(crate) fn collection_value(text: &str) -> Option<Value> {
+    parse_readonly(text).map(|p| p.value)
+}
+
 /// A plain key YAML reads as the same text, by the reader's own key rule.
 pub(crate) fn plain_key(key: &str) -> bool {
     string_key(&TScalarStyle::Plain, key)

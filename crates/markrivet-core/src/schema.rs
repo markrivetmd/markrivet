@@ -296,6 +296,20 @@ impl Bound {
         self.schema.item == ItemShape::File
     }
 
+    /// The same collection name, binding settings and schema bytes: what a
+    /// typed guard is bound to.
+    pub(crate) fn same_binding(&self, other: &Bound) -> bool {
+        (
+            self.name.as_str(),
+            self.binding.as_str(),
+            self.digest.as_str(),
+        ) == (
+            other.name.as_str(),
+            other.binding.as_str(),
+            other.digest.as_str(),
+        )
+    }
+
     /// The refusal every checkbox-only reader and write gives a file binding.
     pub(crate) fn refuse_file(&self) -> Result<(), Diagnostic> {
         if self.is_file() {
@@ -424,7 +438,7 @@ pub(crate) fn schema_id<'a>(
 }
 
 /// Resolve a binding against immutable schema bytes already read by a scanner.
-pub(crate) fn bind_bytes(
+pub fn bind_bytes(
     name: &str,
     collection: CollectionConfig,
     bytes: &[u8],
@@ -2295,15 +2309,7 @@ pub(crate) struct FieldExpectation {
 
 impl FieldExpectation {
     pub(crate) fn binding_matches(&self, bound: &Bound) -> bool {
-        (
-            self.bound.name.as_str(),
-            self.bound.binding.as_str(),
-            self.bound.digest.as_str(),
-        ) == (
-            bound.name.as_str(),
-            bound.binding.as_str(),
-            bound.digest.as_str(),
-        )
+        self.bound.same_binding(bound)
     }
 
     pub(crate) fn check(self, c: &Document, map: &crate::edit::Mapper) -> Result<(), Diagnostic> {
@@ -2577,6 +2583,17 @@ pub fn plan_stamp(
 }
 
 /// Plan a typed field update as a whole-item rewrite.
+/// Field-scope guards are reserved for every typed update.
+fn refuse_field_scope(scope: GuardScope) -> Result<(), Diagnostic> {
+    if scope == GuardScope::Field {
+        return Err(Diagnostic::new(
+            ErrorCode::UnsupportedSyntax,
+            "field guard scope is reserved; use the whole-action guard",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn plan_update(
     planner: &mut Planner,
     bound: &Bound,
@@ -2585,12 +2602,7 @@ pub(crate) fn plan_update(
     scope: GuardScope,
     set: &BTreeMap<String, Value>,
 ) -> Result<Change, Diagnostic> {
-    if scope == GuardScope::Field {
-        return Err(Diagnostic::new(
-            ErrorCode::UnsupportedSyntax,
-            "field guard scope is reserved; use the whole-action guard",
-        ));
-    }
+    refuse_field_scope(scope)?;
     let doc = planner.doc;
     let (list, item) = guarded_item(doc, bound, locator)?;
     let intent_guard = crate::edit::Guard::new(
@@ -2669,6 +2681,85 @@ pub(crate) fn plan_update(
         }),
     });
     change.guard = Some(intent_guard);
+    change.preflight(doc)?;
+    Ok(change)
+}
+
+/// Plan an `update_item` on the file record at `path`: one change carrying
+/// every key edit, guarded by the record revision. Checked in a fixed order:
+/// the request's shape, the guard, the frontmatter existing and reading, the
+/// record valid before the edit, each field's source form, each value's
+/// type, then the no-op test (every value current: no splice, `unchanged`)
+/// and the planning itself.
+pub fn plan_record_update(
+    planner: &mut Planner,
+    bound: &Bound,
+    path: &str,
+    guard: &str,
+    scope: GuardScope,
+    set: &BTreeMap<String, Value>,
+) -> Result<Change, Diagnostic> {
+    use crate::edit::{Expectation, Follow, Guard, GuardSubject, RecordExpectation};
+    if !bound.is_file() {
+        return Err(Diagnostic::new(
+            ErrorCode::InvalidRequest,
+            format!(
+                "collection {} holds checkbox items, not file records",
+                bound.name
+            ),
+        ));
+    }
+    refuse_field_scope(scope)?;
+    if let Some(name) = set.keys().find(|n| !bound.schema.fields.contains_key(*n)) {
+        return Err(Diagnostic::new(
+            ErrorCode::InvalidRequest,
+            format!("{name} is not a field of {}", bound.schema.id),
+        ));
+    }
+    let doc = planner.doc;
+    let intent_guard = Guard::new(
+        GuardSubject::Record {
+            bound: bound.clone(),
+            path: path.to_string(),
+        },
+        guard,
+    );
+    intent_guard.check(doc)?;
+    crate::edit::record_scalars(doc)?;
+    let before = record(doc, bound).map_err(|e| {
+        Diagnostic::new(
+            ErrorCode::InvalidItem,
+            format!(
+                "the record is invalid before the edit: {}",
+                e.messages().join("; ")
+            ),
+        )
+    })?;
+    crate::edit::record_request(doc, bound, set)?;
+    let edits = crate::edit::record_edits(doc, bound, set)?;
+    let mut expect = before;
+    for (name, v) in set {
+        match (v, &bound.schema.fields[name].default) {
+            (Value::Null, Some(d)) => expect.insert(name.clone(), d.clone()),
+            (Value::Null, None) => expect.remove(name),
+            _ => expect.insert(name.clone(), v.clone()),
+        };
+    }
+    let follow = (bound.clone(), path.to_string());
+    let mut change = Change {
+        splices: edits.splices,
+        follow: Some(Follow::Revision(Box::new(move |c| {
+            Some(record_revision(c, &follow.1, &follow.0))
+        }))),
+        expectation: Some(Expectation::Record(Box::new(RecordExpectation {
+            bound: bound.clone(),
+            path: path.to_string(),
+            set: set.clone(),
+            expect,
+        }))),
+        guard: Some(intent_guard),
+        ..Change::default()
+    };
     change.preflight(doc)?;
     Ok(change)
 }

@@ -1185,13 +1185,23 @@ fn write(
                         } => (|| {
                             let bound = find(collection)?;
                             if bound.is_file() {
-                                return Err(Diagnostic::new(
-                                    ErrorCode::InvalidRequest,
-                                    format!(
-                                        "collection {collection} holds file records, which are \
-                                         addressed by path; drop id and select"
-                                    ),
-                                ));
+                                if id.is_some() || select.is_some() {
+                                    return Err(Diagnostic::new(
+                                        ErrorCode::InvalidRequest,
+                                        format!(
+                                            "collection {collection} holds file records, which \
+                                             are addressed by path; drop id and select"
+                                        ),
+                                    ));
+                                }
+                                return schema::plan_record_update(
+                                    &mut planner,
+                                    &bound,
+                                    path,
+                                    guard,
+                                    *guard_scope,
+                                    set,
+                                );
                             }
                             let locator = match (id, select) {
                                 (Some(id), None) => schema::ItemLocator::Id(id.clone()),
@@ -1201,9 +1211,13 @@ fn write(
                                 (None, Some(select @ Selector::Position { .. })) => {
                                     schema::ItemLocator::Position(select.clone())
                                 }
+                                // Neither: only a file record is named by its path.
                                 _ => {
                                     op.check_selectors()?;
-                                    unreachable!("check_selectors refuses every other shape")
+                                    return Err(Diagnostic::new(
+                                        ErrorCode::InvalidRequest,
+                                        crate::edit::UPDATE_ITEM_NAMING,
+                                    ));
                                 }
                             };
                             schema::plan_update(

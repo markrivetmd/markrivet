@@ -188,6 +188,10 @@ pub enum Op {
     },
 }
 
+/// A checkbox `update_item` names its item by exactly one of these.
+pub(crate) const UPDATE_ITEM_NAMING: &str =
+    "update_item names its item by exactly one of id and select";
+
 fn collections_selector() -> Selector {
     Selector::Collections
 }
@@ -218,10 +222,10 @@ impl Op {
                     ErrorCode::InvalidRequest,
                     "update_item.select must be a position or id selector",
                 )),
-                _ => Err(err(
-                    ErrorCode::InvalidRequest,
-                    "update_item names its item by exactly one of id and select",
-                )),
+                // Neither is a file record's request; the dispatch, which
+                // knows the binding, refuses it for a checkbox collection.
+                (None, None) => Ok(()),
+                (Some(_), Some(_)) => Err(err(ErrorCode::InvalidRequest, UPDATE_ITEM_NAMING)),
             },
             Op::Set { .. }
             | Op::AddKey { .. }
@@ -851,10 +855,12 @@ pub struct Splice {
 mod carrier;
 mod intent;
 mod move_intent;
+mod record;
 mod refresh;
 pub(crate) use carrier::Carriers;
 pub(crate) use intent::{Expectation, Guard, GuardSubject};
 pub(crate) use move_intent::{plan as move_item, plan_section as move_section};
+pub(crate) use record::{RecordExpectation, record_edits, record_request, record_scalars};
 pub(crate) use refresh::unrefreshable;
 pub use refresh::{RefreshSelect, Refreshed};
 
@@ -963,6 +969,9 @@ pub enum Follow {
     FrontmatterKey(String),
     /// The target's id plus how to compute the guard a follow-up write needs.
     Custom(String, Reviser),
+    /// How to compute the guard a follow-up write needs, for a target no id
+    /// names (a file record, named by its path).
+    Revision(Reviser),
     /// A write through a position handle: the item is found in the candidate
     /// by the extent it was written to, and reported with the handle and
     /// addressing a read of the candidate would give it. With a binding, the
@@ -4022,7 +4031,7 @@ pub fn plan(doc: &Document, mut changes: Vec<Change>) -> Result<Outcome, Diagnos
                     .resolve(&Selector::FrontmatterKey { key: key.clone() })
                     .ok()
                     .map(|t| c.target_revision(t)),
-                Some(Follow::Custom(_, revision)) => revision(&c),
+                Some(Follow::Custom(_, revision) | Follow::Revision(revision)) => revision(&c),
                 Some(Follow::Placed { region, typed }) => {
                     candidate_item(&c, &map, region).map(|(list, item)| match typed {
                         Some(bound) => crate::schema::item_revision(&c, bound, list, item),
