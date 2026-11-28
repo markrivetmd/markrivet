@@ -3165,6 +3165,12 @@ with every field read from a top-level frontmatter key:
   "exclude_files": ["**/index.md", "**/log.md"]}}}
 ```
 
+An Open Knowledge Format (OKF) v0.3 bundle binds this way, one concept per
+file with its `index.md` and `log.md` files excluded; on OKF's `acme_retail`
+sample at commit `527e81a`, record writes through such a binding left OKF's
+`validate.py` with no new error or warning and moved its `scan.py` trust tiers
+only where a write changed `verified` or `generated.at`.
+
 The binding takes `files` and `exclude_files` only. A member is a `.md` or
 `.markdown` file that `files` matches and no `exclude_files` glob matches, in
 the same glob grammar, and nothing is excluded by default. An excluded file is
