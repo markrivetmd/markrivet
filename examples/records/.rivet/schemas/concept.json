@@ -1,0 +1,13 @@
+{
+  "id": "concept",
+  "version": 1,
+  "item": "file",
+  "fields": {
+    "kind": {"type": "string", "from": "key", "key": "type", "required": true},
+    "status": {"type": "enum", "from": "key", "key": "status", "values": ["draft", "current", "retired"]},
+    "stale_after": {"type": "timestamp", "from": "key", "key": "stale_after"},
+    "tags": {"type": "list", "from": "key", "key": "tags"},
+    "generated_at": {"type": "timestamp", "from": "key", "key": "generated", "field": "at"},
+    "verified": {"type": "entries", "from": "key", "key": "verified"}
+  }
+}

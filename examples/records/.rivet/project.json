@@ -1,0 +1,9 @@
+{
+  "collections": {
+    "concepts": {
+      "schema": "concept@1",
+      "files": ["bundle/**/*.md"],
+      "exclude_files": ["**/index.md", "**/log.md"]
+    }
+  }
+}
