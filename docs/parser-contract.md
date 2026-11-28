@@ -313,6 +313,29 @@ each member heading and own body framed by length, excluding nonmember content.
 Query cursors and restore binding checks reuse the same fingerprint. Old typed
 guards conflict after upgrading; native revisions retain their inputs.
 
+A schema's `item` decides the binding's shape. `ItemShape::File` bindings carry
+`files` and `exclude_files` only (`CollectionConfig.section` is an `Option`, so
+a checkbox binding's serialized config and fingerprint keep their bytes), and
+their fingerprint is SHA-256 of compact JSON `["rivet-file-binding-v1", schema,
+files, exclude_files]`, both lists sorted and deduplicated. Membership is one
+predicate, `CollectionConfig::selects`: `files` matches and no `exclude_files`
+glob does. Every site deciding whether a path is in a collection asks it;
+archive-overlap validation and the walker's globs keep the raw patterns, which
+can only refuse or visit more. Citation scope classifies each found file with
+`ProjectConfig::live_member` (some collection selects it or a section archive's
+`files` match it), dropping a file only an `exclude_files` entry keeps out.
+A file record's fields come from `Source::Key`: a top-level frontmatter key read
+through `yaml::recognize`'s scalars, or one field of its one-level mapping, with
+a bare flat mapping read as a one-entry `entries` value. `schema::record`
+returns the fields or a `RecordError` (no frontmatter, unsupported frontmatter,
+or field errors). The `record` revision frames the record's path as identity
+and `doc.source[frontmatter.span]` as bytes, with the collection name, binding
+fingerprint and schema digest as dependencies. `schema::instance` refuses a file
+binding with `invalid_request`, so a checkbox-only reader that misses its
+`is_file()` check fails loudly instead of reporting a missing heading; sites
+that iterate a path's bindings (collection stamping, archive source checks,
+move membership, status) skip file bindings first.
+
 Guard scope for typed writes is `action` (the whole item) by default and the
 only accepted value. `field` is reserved: it would need a field revision plus
 schema, binding and structural dependencies, and whole-item invariant checks
@@ -894,7 +917,7 @@ selector semantics on one immutable parsed document per selected path. It
 resolves binding and schema bytes before file reads, caches shared schema bytes,
 and fingerprints those inputs. Membership counters include invalid items and
 checked records; physical keys are `(path, list_index, item_index)`, independent
-of stay ids. Explicit requested paths are accounted for independently of
+of stay ids, and a file record is keyed by its path alone. Explicit requested paths are accounted for independently of
 directory discovery. One observed walk covers all live and archive binding
 globs, with requested paths left out of pruning. Discovered counts filter its
 files against selected live globs, keeping their whole-binding meaning; raw
