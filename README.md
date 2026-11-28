@@ -51,6 +51,13 @@ records. The examples here use a task tracker, the busiest case.
   fields and re-read them before committing. A title is optional, a label
   reads one line or, declared `multiline`, its continuation lines too, and
   ticking a checkbox changes one byte.
+- **File records**: a schema with `"item": "file"` makes each matched
+  Markdown file one record, its fields read from frontmatter keys (strings,
+  numbers, dates, timestamps compared by instant, flat lists, and entries
+  such as a `verified` list of `{by, at}`). `query` filters records, `doctor`
+  reports invalid ones, and `update-item` sets several keys and appends
+  entries in one change guarded by the frontmatter's revision; every other
+  byte of the file is kept.
 - **Frontmatter**: single-line scalars and calendar dates are read and
   written in place; empty values, lists and mappings are read as JSON. `set`
   refuses lists and mappings as targets. `add_key_yaml` and `set_key_yaml`

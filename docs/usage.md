@@ -1948,16 +1948,27 @@ as that field, so pass it there.
 #### Record writes
 
 On a file collection (§ File records), `update-item` takes `path`,
-`collection`, `guard` and `set`, and no `id` or `select`, either of which is
-`invalid_request`: the record is the file `path` names, and the guard is its
-`record` revision, as `query` and `map` return it.
+`collection`, `guard`, `set` and optionally `append`, and no `id` or `select`,
+either of which is `invalid_request`: the record is the file `path` names, and
+the guard is its `record` revision, as `query` and `map` return it.
 
 ```sh
 echo '{"path": "bundle/margin.md", "collection": "concepts", "guard": "<record revision>",
        "set": {"status": "retired", "stale_after": "2027-06-30T00:00:00Z"}}' | markrivet update-item
 ```
 
-Every field in `set` is written in one change, guarded by that one revision,
+`append` adds one flat mapping of scalars to each `entries` field it names, in
+the same change as `set`, so recording a verification and pushing
+`stale_after` out is one guarded write:
+
+```sh
+echo '{"path": "bundle/margin.md", "collection": "concepts", "guard": "<record revision>",
+       "set": {"stale_after": "2027-06-30T00:00:00Z"},
+       "append": {"verified": {"by": "human:sam", "at": "2026-11-22T10:00:00Z"}}}' | markrivet update-item
+```
+
+Every field in `set` and every entry in `append` is written in one change,
+guarded by that one revision,
 and `ops[0].revision` is the record's next `record` revision; there is no `id`
 and no `collection_revision`. Inside `write` the record write is a frontmatter
 change: it combines with body ops in the same batch (a log entry beside the
@@ -1978,27 +1989,47 @@ writes it:
 | key present, `key` source | `null` | the key's lines, leaving trailing standalone comments | `delete_key` |
 | key absent | `null` | nothing | |
 | `field` source | `null` | refused `unsupported_syntax` | |
-| `entries` | anything | refused `unsupported_syntax` | |
+| `entries` | anything | refused `unsupported_syntax`: append to it | |
+
+An appended entry is written as `append_key_item` writes it (§
+`append_key_item`): into a single-line flow sequence after its last entry, or
+as a new entry after a block sequence's last line, in the form, key order and
+quote style of the entry before it; or, when the key is absent, as a new
+`key: [{...}]` line among the added keys. Its item rules and refusals are that
+op's: a nonempty mapping of scalars with plain key names (`invalid_request`
+otherwise), values that render on one line, and a sequence `append_key_item`
+appends to (`unsupported_syntax` otherwise, an empty `verified:` and a flow
+sequence spread over lines included). A bare mapping, which reads as one entry,
+is refused `unsupported_syntax` naming the list form: `append` never rewrites
+it into a list. `append` on a checkbox collection, naming a field the schema
+does not have or one that does not hold `entries`, or naming a field `set` also
+names, is `invalid_request`. An append always writes, so a request that appends
+is never `unchanged`.
 
 A collection where a scalar type reads, or a scalar or list where a `field`
 source reads a mapping, makes the record invalid, which is refused before any field's form is
 looked at (below).
 
 Added keys go in as one insertion at the end of the frontmatter, after any
-trailing standalone comment lines, in key-name order. Removing the last key
-while adding others puts them where its lines were, or after the comments
-that followed it. A write that would leave no key is refused
+trailing standalone comment lines, in key-name order, an appended-to absent key
+among them. Removing the last key while adding others puts them where its lines
+were, or after the comments that followed it. An append to a block sequence
+that is the last key goes in before the added keys, and before any trailing
+comments; one whose next key the same request removes goes in where that key's
+lines were, leaving the comments after them. A write that would leave no key is refused
 `unsupported_syntax`, as `delete_key` refuses deleting the last one.
 
 The checks run in a fixed order, and each refusal leaves the file
-byte-identical: a field the schema does not have (`invalid_request`) or
+byte-identical: a field the schema does not have, an `append` field that does
+not hold `entries` or one `set` also names (`invalid_request`), or
 `guard_scope: "field"` (`unsupported_syntax`); the guard (`guard_conflict`); a
 file with no frontmatter or frontmatter that does not read
 (`unsupported_syntax`); a record invalid before the edit (`invalid_item`: fix it
-with native key writes); each field's form, by the table, whatever the value;
-each value's type (`invalid_item`, which `null` on a required field also is).
-Then a request whose values all equal the stored ones writes nothing and
-answers `unchanged`. A stored value is compared before defaults, so setting an
+with native key writes); each field's form, by the table, whatever the value,
+and each appended entry's item and sequence (above); each value's type
+(`invalid_item`, which `null` on a required field also is). Then a request
+whose values all equal the stored ones and that appends nothing writes nothing
+and answers `unchanged`. A stored value is compared before defaults, so setting an
 absent key to its default adds the key, and `null` equals only an absent key:
 a present `key:` or `key: null` is removed. An unwritable form or a stale guard
 refuses even when every value is current. The written frontmatter must read
@@ -3347,6 +3378,42 @@ build, so the script does not show one. The response to one is either
 `status: "uncertain"`. In both cases `get` the unit and compare it with what
 you meant to write before doing anything else.
 
+## Records walkthrough
+
+Run it with `bash examples/records/walkthrough.sh` (set `RIVET` if the binary
+is not on `PATH`). The example is a synthetic bundle with one record per file
+(§ File records): the schema and binding shown there, four concepts under
+`bundle/`, and an `index.md` and `log.md` the binding excludes. The script
+copies it to a scratch directory and checks every result. Abbreviated:
+
+```sh
+C=bundle/metrics/shelf-turnover.md
+
+# 0. Diagnose the records; the index and the log are excluded, no bytes change.
+echo '{"collection": "concepts"}' | markrivet doctor
+
+# 1. Records gone stale before 2027 and not retired: one, with its record guard.
+echo '{"collection": "concepts",
+       "where": [{"field": "stale_after", "op": "lt", "value": "2027-01-01T00:00:00Z"},
+                 {"field": "status", "op": "ne", "value": "retired"}],
+       "fields": ["status", "stale_after"]}' | markrivet query
+
+# 2. map hands a writer the same guard.
+echo "{\"path\": \"$C\"}" | markrivet map
+
+# 3. Make it current, push stale_after out and record the check, in one write.
+#    Only those three lines of the frontmatter change.
+echo '{"path": "bundle/metrics/shelf-turnover.md", "collection": "concepts",
+       "guard": "<record revision>",
+       "set": {"status": "current", "stale_after": "2027-06-30T00:00:00Z"},
+       "append": {"verified": {"by": "human:wren", "at": "2026-11-28T09:00:00Z"}}}' | markrivet update-item
+
+# 4. Query again: nothing is stale, and the record reads both verified entries.
+# 5. Replaying the old guard exits 2 with guard_conflict and error.current.
+# 6. A bare verified mapping reads as one entry; append to it is refused
+#    unsupported_syntax and the file is left as it was.
+```
+
 ## Not implemented
 
 These are design directions, not features:
@@ -3365,7 +3432,7 @@ These are design directions, not features:
 - Token counts. Sizes are reported in bytes; no tokenizer is bundled.
 - Typed record creation (`insert-item` on a file collection; `create` writes a
   new file), record writes that add a missing mapping or mapping field, replace
-  a block list or append to an `entries` field, and archives, `ready` waits and
+  a block list or set an `entries` field, and archives, `ready` waits and
   moves for file records (§ File records, § Record writes).
 - General directory creation (`archive-mkdir` creates confined archive parents),
   and adding frontmatter to a document that has none.
