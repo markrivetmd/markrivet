@@ -1060,3 +1060,22 @@ fn section_archive_copies_work_beside_a_file_binding() {
         "{history}"
     );
 }
+
+/// A file only an `exclude_files` entry keeps out of its collection is in no
+/// live namespace, so it is no move endpoint either way.
+#[test]
+fn an_excluded_file_is_no_move_endpoint() {
+    let s = fixture::MoveStore::new("tight", false);
+    let mut c = s.config();
+    c["collections"]["pages"] = json!({"schema": "tracker@1", "files": ["notes/*.md"], "exclude_files": ["notes/excluded.md"]});
+    s.set_config(c);
+    put(&s.root, ".rivet/schemas/tracker.json", TRACKER);
+    put(&s.root, "notes/excluded.md", &s.read(fixture::B));
+    s.git(&["add", "-A"]);
+    s.git(&["commit", "-qm", "an excluded note"]);
+    for field in ["destination", "source"] {
+        let mut request = s.request();
+        request[field] = json!("notes/excluded.md");
+        s.refuses(request, "move_refused", Some(&format!("{field}_not_live")));
+    }
+}
