@@ -115,10 +115,11 @@ write prerequisites without changing project bytes.
 ## Platforms
 
 Linux is supported. CI builds and tests on Linux x86_64 with the pinned
-toolchain in `.github/workflows/ci.yml`; other Linux architectures are
-expected to work but are not tested. The crates declare Rust 1.89 as their
-minimum (`rust-version`), which CI does not build with; per-write commits and
-history need git 2.36 or later.
+toolchain in `.github/workflows/ci.yml`; release builds are also tested on
+Linux aarch64. The release binaries need glibc 2.34 or later. musl-based
+distributions such as Alpine do not build today. The crates declare Rust 1.89
+as their minimum (`rust-version`), which CI does not build with; per-write
+commits and history need git 2.36 or later.
 
 macOS is not supported yet: Rivet does not build for it, per-write commits and
 recovery read Linux `/proc`, and its durability and path-identity guarantees
@@ -134,6 +135,25 @@ Install from `github.com/markrivetmd/markrivet` with Cargo:
 ```sh
 cargo install --locked --git https://github.com/markrivetmd/markrivet markrivet-cli
 ```
+
+Or download a release binary:
+
+```sh
+# Linux x86_64 with glibc 2.34 or later (aarch64: change x86_64 in asset=)
+set -e
+asset=markrivet-x86_64-unknown-linux-gnu.tar.gz
+base=https://github.com/markrivetmd/markrivet/releases/latest/download
+curl -fLO "$base/$asset"
+curl -fLO "$base/SHA256SUMS"
+grep "  $asset\$" SHA256SUMS | sha256sum -c
+tar -xzf "$asset"
+"${asset%.tar.gz}/markrivet" --version
+```
+
+The release workflow builds and tests the binaries on x86_64 and aarch64
+Linux and runs each one through the walkthrough on glibc 2.34.
+`gh attestation verify <archive> -R markrivetmd/markrivet` checks an
+archive's build provenance.
 
 The crates are not on crates.io yet. To build from a checkout instead, see
 below.

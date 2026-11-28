@@ -17,7 +17,9 @@ which the test suite executes. Anything not implemented is listed under
 
 ## Install
 
-Linux is supported; CI builds and tests on Linux x86_64. macOS is not
+Linux is supported; CI builds and tests on Linux x86_64, and release builds
+are also tested on Linux aarch64. The release binaries need glibc 2.34 or
+later; musl-based distributions such as Alpine do not build today. macOS is not
 supported yet: Rivet does not build for it, per-write commits and recovery
 read Linux `/proc`, and its durability and path-identity guarantees are
 unchecked on APFS. Windows is not supported (the code imports
@@ -30,6 +32,25 @@ Install from `github.com/markrivetmd/markrivet` with Cargo:
 cargo install --locked --git https://github.com/markrivetmd/markrivet markrivet-cli
 ```
 
+Or download a release binary:
+
+```sh
+# Linux x86_64 with glibc 2.34 or later (aarch64: change x86_64 in asset=)
+set -e
+asset=markrivet-x86_64-unknown-linux-gnu.tar.gz
+base=https://github.com/markrivetmd/markrivet/releases/latest/download
+curl -fLO "$base/$asset"
+curl -fLO "$base/SHA256SUMS"
+grep "  $asset\$" SHA256SUMS | sha256sum -c
+tar -xzf "$asset"
+"${asset%.tar.gz}/markrivet" --version
+```
+
+The release workflow builds and tests the binaries on x86_64 and aarch64
+Linux and runs each one through the walkthrough on glibc 2.34.
+`gh attestation verify <archive> -R markrivetmd/markrivet` checks an
+archive's build provenance.
+
 The crates are not on crates.io yet. From a checkout:
 
 ```sh
@@ -40,7 +61,9 @@ markrivet --version                         # markrivet 0.1.0 <commit>[-dirty]
 
 `--version` names the commit the binary was built from, with `-dirty` when
 the build's sources (`Cargo.toml`, `Cargo.lock`, `crates/`) differed from it,
-and `unknown` outside a git checkout.
+and `unknown` outside a git checkout, as for a build from GitHub's source
+archive extracted outside any git checkout. A release binary names its tag's
+commit.
 
 The walkthrough script also needs `jq`.
 
