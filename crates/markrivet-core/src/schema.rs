@@ -2895,7 +2895,8 @@ pub fn check_clause(schema: &Schema, clause: &Clause) -> Result<(), Diagnostic> 
     };
     let ok = match clause.op {
         Cmp::Exists | Cmp::Missing => clause.value.is_null(),
-        Cmp::In => clause.value.as_array().is_some_and(|a| a.iter().all(fits)),
+        // Checked on the type, so an empty `in` cannot slip a list past it.
+        Cmp::In => kind.scalar() && clause.value.as_array().is_some_and(|a| a.iter().all(fits)),
         Cmp::Contains => {
             matches!(kind, FieldType::String | FieldType::List) && clause.value.is_string()
         }
@@ -3548,6 +3549,7 @@ mod file_record_tests {
             ("tags", "eq", json!(["a", "b"])),
             ("tags", "contains", json!(1)),
             ("tags", "in", json!([["a"]])),
+            ("tags", "in", json!([])),
             ("tags", "lt", json!("a")),
             ("id", "eq", json!("x")),
         ] {

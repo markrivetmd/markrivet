@@ -233,6 +233,8 @@ fn query_filters_records_on_each_type() {
         json!({"field": "stale_after", "op": "lt", "value": "2027-01-01"}),
         json!({"field": "tags", "op": "eq", "value": ["finance", "kpi"]}),
         json!({"field": "verified", "op": "eq", "value": []}),
+        json!({"field": "verified", "op": "in", "value": []}),
+        json!({"field": "tags", "op": "in", "value": []}),
         json!({"field": "id", "op": "eq", "value": "x"}),
     ] {
         refuse(
@@ -984,4 +986,77 @@ fn doctor_on_the_example_tracker_prints_the_bytes_it_did_before() {
     let root_json = serde_json::to_string(&root.display().to_string()).unwrap();
     let text = text.replace(&root_json, "\"<root>\"");
     assert_eq!(text, include_str!("fixtures/doctor_tracker_5bacd0f.json"));
+}
+
+const HISTORY: &str = "history/2026-11/LOG_HISTORY.md";
+
+/// A tracker whose Log bullets and Log subsections archive through a
+/// `section_archives` binding, while the file is also a file record.
+fn section_store(name: &str) -> Store {
+    let root = records(name);
+    let home = root.with_extension("isolated-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let s = Store { root, home };
+    with_trackers(&s.root);
+    put(
+        &s.root,
+        WIDGETS,
+        "---\nstatus: active\nowner: sam\n---\n# Synthetic\n\n## Action\n\n- [ ] Keep this open.\n\n## Log\n\n- **2026-11-12: New** Body.\n- **2026-10-06: Old** Older.\n\n### Entry\n\nRefresh the fixtures.\n",
+    );
+    put(&s.root, HISTORY, "# Log history\n\n## Log\n\n## Closed\n");
+    for path in [WIDGETS, HISTORY] {
+        let (_, map) = rivet(&s.root, "map", json!({"path": path}));
+        let (code, out) = rivet(
+            &s.root,
+            "stamp",
+            json!({"path": path, "guard": map["revision"], "select": {"kind": "document"}}),
+        );
+        assert_eq!(code, 0, "{out}");
+    }
+    let mut c = config(&s.root);
+    c["section_archives"] = json!({"history": {"files": ["tracking/*.md"],
+        "archive": ["history/**/*.md"], "items": {"headings": [["Log"]]}}});
+    c["git"] = json!({"commit": "per-write", "on_dirty": "refuse"});
+    set_config(&s.root, &c);
+    s.git(&["init", "-q", "-b", "main"]);
+    s.git(&["config", "user.name", "Synthetic Tester"]);
+    s.git(&["config", "user.email", "tester@example.invalid"]);
+    s.git(&["add", "-A"]);
+    s.git(&["commit", "-qm", "synthetic fixture"]);
+    s
+}
+
+#[test]
+fn section_archive_copies_work_beside_a_file_binding() {
+    let s = section_store("file-records-sections");
+    let doc = markrivet_core::Document::parse(&read(&s.root, WIDGETS)).unwrap();
+    let stay = |title: &str| {
+        let i = doc
+            .sections
+            .iter()
+            .position(|x| x.path.last().is_some_and(|t| t == title))
+            .unwrap();
+        doc.section_ids(i)[0].clone()
+    };
+    let item = doc.lists[1].items[1].markers[0];
+    let item = doc.markers[item].lexical.id.clone().unwrap();
+    let request = |id: &str, parent: &str, heading: &str| {
+        let select = json!({"kind": "heading_path", "path": [heading]});
+        let (_, dest) = s.run("get", json!({"path": HISTORY, "select": select}));
+        json!({"source": WIDGETS, "id": id, "guard": item_guard(&s.root, WIDGETS, id),
+            "parent": parent, "path": HISTORY, "select": select,
+            "destination_guard": dest["revision"]})
+    };
+    let copied = s.ok("archive-copy", request(&item, &stay("Log"), "Log"));
+    assert_eq!(copied["commit"]["status"], "committed", "{copied}");
+    let copied = s.ok(
+        "archive-copy",
+        request(&stay("Entry"), &stay("Log"), "Closed"),
+    );
+    assert_eq!(copied["commit"]["status"], "committed", "{copied}");
+    let history = read(&s.root, HISTORY);
+    assert!(
+        history.contains("2026-10-06: Old") && history.contains("### Entry"),
+        "{history}"
+    );
 }

@@ -69,7 +69,9 @@ fn namespaces(
                 format!("{path} matches an archive namespace"),
             ));
         }
-        if !schema::matches_file_patterns(&config.live_patterns(), path) {
+        // Live by membership, so a file only an `exclude_files` entry keeps
+        // out of its collection is no endpoint.
+        if !config.live_member(path) {
             return Err(refused(live, format!("{path} matches no live namespace")));
         }
     }
@@ -1027,6 +1029,17 @@ impl MoveReceipt {
         }
         let state = move_config(project, &config, &self.source.path, &self.destination.path)
             .map_err(|e| ("config_changed", e.detail()))?;
+        // The digest covers raw globs, so an exclusion added since the move
+        // was planned is caught here rather than by it.
+        if [&self.source.path, &self.destination.path]
+            .iter()
+            .any(|p| !config.live_member(p))
+        {
+            return Err((
+                "config_changed",
+                "a move endpoint is no longer in a live namespace".into(),
+            ));
+        }
         if state.digest != self.config_sha256 || state.bindings != self.bindings {
             return Err((
                 "config_changed",
