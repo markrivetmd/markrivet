@@ -35,8 +35,14 @@ pub struct CollectionConfig {
     pub schema: String,
     /// Globs relative to the project root: `*`, `?` and whole-segment `**`.
     pub files: Vec<String>,
-    /// Exact title of the section holding the items.
-    pub section: String,
+    /// File records only: globs, in the same grammar, of files `files`
+    /// matches that are not members.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_files: Vec<String>,
+    /// Exact title of the section holding the items. Required for checkbox
+    /// items and refused for file records, whose items are whole files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
     #[serde(default)]
     pub level: Option<u8>,
     /// Take the bound section's descendant sections as members too, so a
@@ -91,7 +97,32 @@ pub struct ItemSources {
     pub headings: Vec<Vec<String>>,
 }
 
+impl CollectionConfig {
+    /// Membership: `files` matches the path and no `exclude_files` glob does.
+    /// Every site that decides whether a path is in this collection asks this.
+    pub fn selects(&self, path: &str) -> bool {
+        matches_file_patterns(&self.files, path)
+            && !matches_file_patterns(&self.exclude_files, path)
+    }
+
+    /// The bound section's title; empty only for a file binding, which never
+    /// reaches a section reader.
+    pub(crate) fn section(&self) -> &str {
+        self.section.as_deref().unwrap_or("")
+    }
+}
+
 impl ProjectConfig {
+    /// A live file: some collection selects it, or some section archive
+    /// binding's `files` match it.
+    pub(crate) fn live_member(&self, path: &str) -> bool {
+        self.collections.values().any(|c| c.selects(path))
+            || self
+                .section_archives
+                .values()
+                .any(|b| matches_file_patterns(&b.files, path))
+    }
+
     pub(crate) fn live_patterns(&self) -> Vec<String> {
         self.collections
             .values()
@@ -163,6 +194,20 @@ pub enum FieldType {
     Number,
     Date,
     Enum,
+    /// `YYYY-MM-DDTHH:MM:SS[.f{1,9}](Z|±HH:MM)`, compared by instant.
+    Timestamp,
+    /// A flat sequence of strings.
+    List,
+    /// A sequence of flat mappings of scalars; a bare flat mapping reads as
+    /// one entry.
+    Entries,
+}
+
+impl FieldType {
+    /// Types whose value is one scalar, which may have a default.
+    fn scalar(self) -> bool {
+        !matches!(self, FieldType::List | FieldType::Entries)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -183,6 +228,9 @@ pub enum Source {
     /// label: before the first label, and after each one-line label up to
     /// the next. A `**Lead-in**:` line naming no declared label is text.
     Text,
+    /// File records: the top-level frontmatter key `key`, or with `field`
+    /// one immediate scalar field of that key's one-level mapping.
+    Key,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -204,6 +252,12 @@ pub struct FieldSpec {
     /// label is one line, and the lines after it are text.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub multiline: bool,
+    /// `from: "key"`: the frontmatter key read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// `from: "key"`: the field of the key's mapping read, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
 }
@@ -212,6 +266,8 @@ pub struct FieldSpec {
 #[serde(rename_all = "snake_case")]
 pub enum ItemShape {
     Checkbox,
+    /// Each member file is one record, its fields read from frontmatter.
+    File,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -232,6 +288,27 @@ pub struct Bound {
     pub digest: String,
     /// Canonical, versioned identity of every binding setting.
     pub binding: String,
+}
+
+impl Bound {
+    /// A collection of file records rather than checkbox items.
+    pub fn is_file(&self) -> bool {
+        self.schema.item == ItemShape::File
+    }
+
+    /// The refusal every checkbox-only reader and write gives a file binding.
+    pub(crate) fn refuse_file(&self) -> Result<(), Diagnostic> {
+        if self.is_file() {
+            return Err(Diagnostic::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "collection {} holds file records, not checkbox items",
+                    self.name
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn invalid_schema(message: impl Into<String>) -> Diagnostic {
@@ -264,10 +341,7 @@ pub(crate) fn bound_paths(
     let mut schemas = BTreeMap::<String, Vec<u8>>::new();
     let mut bounds = Vec::new();
     for (name, collection) in &config.collections {
-        if !paths
-            .iter()
-            .any(|p| matches_file_patterns(&collection.files, p))
-        {
+        if !paths.iter().any(|p| collection.selects(p)) {
             continue;
         }
         let id = schema_id(name, collection)?;
@@ -288,7 +362,7 @@ pub(crate) fn bound_paths(
         .map(|path| {
             bounds
                 .iter()
-                .filter(|b| matches_file_patterns(&b.config.files, path))
+                .filter(|b| b.config.selects(path))
                 .cloned()
                 .collect()
         })
@@ -370,8 +444,9 @@ pub(crate) fn bind_bytes(
         )));
     }
     validate_schema(&schema)?;
+    validate_shape(name, &collection, schema.item)?;
     let digest = format!("{:x}", Sha256::digest(bytes));
-    let binding = binding_fingerprint(&collection);
+    let binding = binding_fingerprint(&collection, schema.item);
     Ok(Bound {
         name: name.to_string(),
         key: collection.schema.clone(),
@@ -382,18 +457,70 @@ pub(crate) fn bind_bytes(
     })
 }
 
+/// The binding settings the schema's shape allows (D1): a file binding is
+/// `files` and `exclude_files` only; a checkbox binding names its section and
+/// takes no `exclude_files`.
+fn validate_shape(
+    name: &str,
+    config: &CollectionConfig,
+    shape: ItemShape,
+) -> Result<(), Diagnostic> {
+    match shape {
+        ItemShape::File => {
+            for (setting, present) in [
+                ("section", config.section.is_some()),
+                ("level", config.level.is_some()),
+                ("subsections", config.subsections),
+                ("exclude", !config.exclude.is_empty()),
+                ("archive", !config.archive.is_empty()),
+            ] {
+                if present {
+                    return Err(invalid_schema(format!(
+                        "collection {name}: {setting} does not apply to file records; \
+                         a file binding takes files and exclude_files"
+                    )));
+                }
+            }
+        }
+        ItemShape::Checkbox => {
+            if !config.exclude_files.is_empty() {
+                return Err(invalid_schema(format!(
+                    "collection {name}: exclude_files is for file records; \
+                     a checkbox binding narrows its files with files alone"
+                )));
+            }
+            if config.section.is_none() {
+                return Err(invalid_schema(format!(
+                    "collection {name}: a checkbox binding needs section"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Sets have no ordering or multiplicity semantics; defaults are explicit.
-fn binding_fingerprint(config: &CollectionConfig) -> String {
-    let bytes = serde_json::to_vec(&(
-        "rivet-binding-v1",
-        &config.schema,
-        config.files.iter().collect::<BTreeSet<_>>(),
-        &config.section,
-        config.level,
-        config.subsections,
-        config.exclude.iter().collect::<BTreeSet<_>>(),
-        config.archive.iter().collect::<BTreeSet<_>>(),
-    ))
+/// Each shape has its own tuple, and the checkbox one is unchanged, so no
+/// guard a caller already holds moves.
+fn binding_fingerprint(config: &CollectionConfig, shape: ItemShape) -> String {
+    let bytes = match shape {
+        ItemShape::Checkbox => serde_json::to_vec(&(
+            "rivet-binding-v1",
+            &config.schema,
+            config.files.iter().collect::<BTreeSet<_>>(),
+            config.section(),
+            config.level,
+            config.subsections,
+            config.exclude.iter().collect::<BTreeSet<_>>(),
+            config.archive.iter().collect::<BTreeSet<_>>(),
+        )),
+        ItemShape::File => serde_json::to_vec(&(
+            "rivet-file-binding-v1",
+            &config.schema,
+            config.files.iter().collect::<BTreeSet<_>>(),
+            config.exclude_files.iter().collect::<BTreeSet<_>>(),
+        )),
+    }
     .expect("binding json");
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -401,6 +528,8 @@ fn binding_fingerprint(config: &CollectionConfig) -> String {
 fn validate_schema(schema: &Schema) -> Result<(), Diagnostic> {
     let mut singles = BTreeSet::new();
     let mut labels = BTreeSet::new();
+    // `(key, field)` pairs a file schema reads; `None` reads the key whole.
+    let mut keys = BTreeMap::<&str, BTreeSet<Option<&str>>>::new();
     for (name, f) in &schema.fields {
         if name == "id" {
             return Err(invalid_schema(
@@ -414,14 +543,65 @@ fn validate_schema(schema: &Schema) -> Result<(), Diagnostic> {
             }
             Source::Title | Source::Text => f.kind == FieldType::String,
             Source::TitleDate => f.kind == FieldType::Date,
-            Source::Label => f
-                .label
-                .as_ref()
-                .is_some_and(|l| !l.is_empty() && !l.contains(['*', '\n', ':'])),
+            Source::Label => {
+                f.kind.scalar()
+                    && f.label
+                        .as_ref()
+                        .is_some_and(|l| !l.is_empty() && !l.contains(['*', '\n', ':']))
+            }
+            Source::Key => f.key.is_some() && (f.field.is_none() || f.kind.scalar()),
         };
         if !ok {
             return Err(invalid_schema(format!(
                 "field {name}: type and source do not fit"
+            )));
+        }
+        match (schema.item, f.from == Source::Key) {
+            (ItemShape::File, true) | (ItemShape::Checkbox, false) => {}
+            (ItemShape::File, false) => {
+                return Err(invalid_schema(format!(
+                    "field {name}: a file record reads every field from a frontmatter key"
+                )));
+            }
+            (ItemShape::Checkbox, true) => {
+                return Err(invalid_schema(format!(
+                    "field {name}: from key is for file records; a checkbox item has no frontmatter"
+                )));
+            }
+        }
+        if f.from == Source::Key {
+            if !f.tags.is_empty() || f.label.is_some() || f.multiline {
+                return Err(invalid_schema(format!(
+                    "field {name}: a key field takes key and field, not tags, label or multiline"
+                )));
+            }
+            let key = f.key.as_deref().expect("checked above");
+            for (what, part) in [("key", Some(key)), ("field", f.field.as_deref())] {
+                if let Some(part) = part {
+                    crate::edit::check_key_name(what, part)
+                        .map_err(|d| invalid_schema(format!("field {name}: {}", d.message)))?;
+                }
+            }
+            let read = keys.entry(key).or_default();
+            let field = f.field.as_deref();
+            if read.contains(&field) {
+                return Err(invalid_schema(format!(
+                    "field {name}: another field already reads {}",
+                    match field {
+                        Some(x) => format!("{key}.{x}"),
+                        None => key.to_string(),
+                    }
+                )));
+            }
+            if read.contains(&None) || (field.is_none() && !read.is_empty()) {
+                return Err(invalid_schema(format!(
+                    "field {name}: key {key} is read both whole and through a field"
+                )));
+            }
+            read.insert(field);
+        } else if f.key.is_some() || f.field.is_some() {
+            return Err(invalid_schema(format!(
+                "field {name}: key and field are for from key"
             )));
         }
         if f.multiline && f.from != Source::Label {
@@ -438,22 +618,27 @@ fn validate_schema(schema: &Schema) -> Result<(), Diagnostic> {
             if !labels.insert(f.label.clone().unwrap_or_default()) {
                 return Err(invalid_schema(format!("field {name}: label used twice")));
             }
-        } else if !singles.insert(format!("{:?}", f.from)) {
+        } else if f.from != Source::Key && !singles.insert(format!("{:?}", f.from)) {
             return Err(invalid_schema(format!(
                 "field {name}: source {:?} used twice",
                 f.from
             )));
         }
         if let Some(d) = &f.default {
+            if !f.kind.scalar() {
+                return Err(invalid_schema(format!(
+                    "field {name}: only a scalar field takes a default"
+                )));
+            }
             check_value(f, d).map_err(|m| invalid_schema(format!("field {name} default: {m}")))?;
         }
     }
-    if !singles.contains("Checkbox") {
-        return Err(invalid_schema(
+    match schema.item {
+        ItemShape::Checkbox if !singles.contains("Checkbox") => Err(invalid_schema(
             "a checkbox collection needs a checkbox field",
-        ));
+        )),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Calendar-validated `YYYY-MM-DD`.
@@ -483,6 +668,84 @@ pub fn valid_date(s: &str) -> bool {
     (1..=days).contains(&d)
 }
 
+/// The instant a timestamp names, as UTC nanoseconds since 1970-01-01, or
+/// `None` when the text is not one. The grammar is strict:
+/// `YYYY-MM-DDTHH:MM:SS`, an optional fraction of one to nine digits, then
+/// `Z` or `±HH:MM`, with a calendar-valid date, hours 00-23 and minutes and
+/// seconds 00-59. Lowercase `t` or `z`, a space separator, a missing offset
+/// and `24:00` are not timestamps; nothing is coerced.
+pub fn timestamp_instant(s: &str) -> Option<i128> {
+    let b = s.as_bytes();
+    if !s.is_ascii()
+        || b.len() < 20
+        || !valid_date(&s[..10])
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return None;
+    }
+    let two = |at: usize| -> Option<i128> {
+        match b.get(at..at + 2)? {
+            [x @ b'0'..=b'9', y @ b'0'..=b'9'] => {
+                Some(i128::from(x - b'0') * 10 + i128::from(y - b'0'))
+            }
+            _ => None,
+        }
+    };
+    let (hour, minute, second) = (two(11)?, two(14)?, two(17)?);
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let mut at = 19;
+    let mut nanos = 0i128;
+    if b[at] == b'.' {
+        let digits = b[at + 1..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        if !(1..=9).contains(&digits) {
+            return None;
+        }
+        for (i, c) in b[at + 1..at + 1 + digits].iter().enumerate() {
+            nanos += i128::from(c - b'0') * 10i128.pow(8 - i as u32);
+        }
+        at += 1 + digits;
+    }
+    let offset = match &b[at..] {
+        [b'Z'] => 0,
+        [sign @ (b'+' | b'-'), _, _, b':', _, _] => {
+            let (h, m) = (two(at + 1)?, two(at + 4)?);
+            if h > 23 || m > 59 {
+                return None;
+            }
+            if *sign == b'+' {
+                h * 3600 + m * 60
+            } else {
+                -(h * 3600 + m * 60)
+            }
+        }
+        _ => return None,
+    };
+    let num = |r: std::ops::Range<usize>| s[r].parse::<i128>().ok();
+    let (year, month, day) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    // Days since the epoch in the proleptic Gregorian calendar.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let year_of_era = y - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    let seconds = days * 86_400 + hour * 3600 + minute * 60 + second - offset;
+    Some(seconds * 1_000_000_000 + nanos)
+}
+
+/// One `entries` element: a mapping whose values are all scalars.
+fn flat_mapping(v: &Value) -> bool {
+    v.as_object()
+        .is_some_and(|m| m.values().all(|x| !x.is_array() && !x.is_object()))
+}
+
 fn tag_matches(tags: &[String], value: &str) -> bool {
     tags.iter().any(|t| match t.strip_suffix('*') {
         Some(prefix) => value.starts_with(prefix) && value.len() > prefix.len(),
@@ -502,8 +765,17 @@ pub(crate) fn check_value(f: &FieldSpec, v: &Value) -> Result<(), String> {
         | (FieldType::Number, Value::Number(_)) => Ok(()),
         (FieldType::Date, Value::String(s)) if valid_date(s) => Ok(()),
         (FieldType::Enum, Value::String(s)) if f.values.contains(s) => Ok(()),
+        (FieldType::Timestamp, Value::String(s)) if timestamp_instant(s).is_some() => Ok(()),
+        (FieldType::List, Value::Array(a)) if a.iter().all(Value::is_string) => Ok(()),
+        (FieldType::Entries, Value::Array(a)) if a.iter().all(flat_mapping) => Ok(()),
         (FieldType::Date, _) => Err("expected a calendar date YYYY-MM-DD".into()),
         (FieldType::Enum, _) => Err(format!("expected one of {:?}", f.values)),
+        (FieldType::Timestamp, _) => Err(
+            "expected a timestamp YYYY-MM-DDTHH:MM:SS[.fraction] ending in Z or an offset ±HH:MM"
+                .into(),
+        ),
+        (FieldType::List, _) => Err("expected a list of strings".into()),
+        (FieldType::Entries, _) => Err("expected a list of flat mappings of scalars".into()),
         (kind, _) => Err(format!("expected {kind:?}").to_lowercase()),
     }
 }
@@ -990,6 +1262,8 @@ pub fn discover(
             Source::Text => Some(found.joined_text())
                 .filter(|t| !t.is_empty())
                 .map(Value::String),
+            // A checkbox schema refuses key fields at binding.
+            Source::Key => None,
         };
         out.insert(name.clone(), raw);
     }
@@ -1446,6 +1720,11 @@ fn edit_fields(
         match f.from {
             // Resolved into the head above.
             Source::Tag | Source::Title | Source::TitleDate => {}
+            Source::Key => {
+                return Err(bad(format!(
+                    "{name}: a key field belongs to a file record, not a checkbox item"
+                )));
+            }
             Source::Checkbox if value.is_null() => {
                 return Err(bad(format!("{name}: a checkbox cannot be removed")));
             }
@@ -1743,6 +2022,10 @@ impl Instance {
 }
 
 pub fn instance(doc: &Document, bound: &Bound) -> Result<Option<Instance>, Diagnostic> {
+    // A missed checkbox-only site then fails loudly rather than reading a
+    // file record as a missing heading.
+    bound.refuse_file()?;
+    let section = bound.config.section();
     let matches: Vec<usize> = doc
         .sections
         .iter()
@@ -1751,7 +2034,7 @@ pub fn instance(doc: &Document, bound: &Bound) -> Result<Option<Instance>, Diagn
             doc.blocks[s.block]
                 .heading
                 .as_ref()
-                .is_some_and(|h| h.title_text == bound.config.section)
+                .is_some_and(|h| h.title_text == section)
                 && bound.config.level.is_none_or(|l| l == s.level)
         })
         .map(|(i, _)| i)
@@ -1762,11 +2045,7 @@ pub fn instance(doc: &Document, bound: &Bound) -> Result<Option<Instance>, Diagn
         _ => {
             return Err(Diagnostic::new(
                 ErrorCode::AmbiguousSelector,
-                format!(
-                    "{} sections are titled {:?}",
-                    matches.len(),
-                    bound.config.section
-                ),
+                format!("{} sections are titled {section:?}", matches.len()),
             ));
         }
     };
@@ -1856,6 +2135,123 @@ pub fn collection_revision(doc: &Document, bound: &Bound, inst: &Instance) -> St
         &bound.name,
         content,
         &[bound.binding.as_bytes(), bound.digest.as_bytes()],
+    )
+}
+
+/// Why a member file does not read as a valid record. None of these drops
+/// the file silently: `query` and `doctor` report each as `invalid_item`.
+#[derive(Debug, Clone)]
+pub enum RecordError {
+    /// The file has no frontmatter block.
+    NoFrontmatter,
+    /// The frontmatter does not read; the reader's own diagnostic.
+    Unsupported(Box<Diagnostic>),
+    /// The frontmatter reads, and these fields do not fit the schema.
+    Fields(Vec<String>),
+}
+
+impl RecordError {
+    /// One message per problem.
+    pub fn messages(&self) -> Vec<String> {
+        match self {
+            RecordError::NoFrontmatter => vec!["the file has no frontmatter".into()],
+            RecordError::Unsupported(d) => vec![d.message.clone()],
+            RecordError::Fields(errors) => errors.clone(),
+        }
+    }
+
+    /// The whole record's problems as one `invalid_item`, with the
+    /// unsupported frontmatter's span when that is the reason.
+    pub fn diagnostic(&self) -> Diagnostic {
+        let d = Diagnostic::new(ErrorCode::InvalidItem, self.messages().join("; "));
+        match self {
+            RecordError::Unsupported(u) => match u.span {
+                Some(span) => d.with_span(span),
+                None => d,
+            },
+            _ => d,
+        }
+    }
+}
+
+/// A file record's fields, read from its frontmatter keys by the schema's
+/// `from: "key"` fields. Membership is the caller's: this reads any document.
+/// An absent key, an empty value and `null` all read as absent, so `default`
+/// and `required` apply; a value of the wrong type is an error, never coerced.
+pub fn record(doc: &Document, bound: &Bound) -> Result<Map<String, Value>, RecordError> {
+    if doc.frontmatter.span.is_none() {
+        return Err(RecordError::NoFrontmatter);
+    }
+    let scalars = doc
+        .frontmatter
+        .fields
+        .as_ref()
+        .map_err(|d| RecordError::Unsupported(Box::new(d.clone())))?;
+    let mut out = Map::new();
+    let mut errors = vec![];
+    for (name, f) in &bound.schema.fields {
+        match key_value(scalars, f) {
+            Err(m) => errors.push(format!("{name}: {m}")),
+            Ok(raw) => match raw.or_else(|| f.default.clone()) {
+                Some(v) => match check_value(f, &v) {
+                    Ok(()) => {
+                        out.insert(name.clone(), v);
+                    }
+                    Err(m) => errors.push(format!("{name}: {m}")),
+                },
+                None if f.required => errors.push(format!("{name}: required field missing")),
+                None => {}
+            },
+        }
+    }
+    if errors.is_empty() {
+        Ok(out)
+    } else {
+        Err(RecordError::Fields(errors))
+    }
+}
+
+/// The value one key field reads, before defaults and type checks: `None`
+/// when absent, empty or `null`. A bare flat mapping read by an `entries`
+/// field is one entry.
+fn key_value(scalars: &[crate::yaml::Scalar], f: &FieldSpec) -> Result<Option<Value>, String> {
+    let key = f.key.as_deref().expect("a file schema reads keys");
+    let Some(scalar) = scalars.iter().find(|s| s.key == key) else {
+        return Ok(None);
+    };
+    let value = match (&scalar.value, f.field.as_deref()) {
+        (Value::Null, _) => return Ok(None),
+        (v, None) => v.clone(),
+        (Value::Object(m), Some(field)) => match m.get(field) {
+            None | Some(Value::Null) => return Ok(None),
+            Some(v) => v.clone(),
+        },
+        (_, Some(_)) => return Err(format!("{key} is not a mapping")),
+    };
+    Ok(Some(match (f.kind, value) {
+        (FieldType::Entries, v @ Value::Object(_)) => Value::Array(vec![v]),
+        (_, v) => v,
+    }))
+}
+
+/// A record's guard: the frontmatter block's bytes (opening fence through the
+/// closing fence's line terminator, BOM excluded; empty without one), named
+/// by the record's path and bound to the binding and schema as `action`
+/// guards are. A body edit leaves it; any frontmatter byte moves it.
+pub fn record_revision(doc: &Document, path: &str, bound: &Bound) -> String {
+    let bytes = doc
+        .frontmatter
+        .span
+        .map_or(&[][..], |s| &doc.source.as_bytes()[s.start..s.end]);
+    revision(
+        "record",
+        path,
+        bytes,
+        &[
+            bound.name.as_bytes(),
+            bound.binding.as_bytes(),
+            bound.digest.as_bytes(),
+        ],
     )
 }
 
@@ -2044,6 +2440,7 @@ pub fn plan_bound_set(
         ));
     }
     let bound = precondition_binding(bindings, name)?;
+    bound.refuse_file()?;
     let doc = planner.doc;
     let Target::Item { list, item } = doc.resolve(select)? else {
         return Err(Diagnostic::new(
@@ -2151,6 +2548,7 @@ pub fn plan_stamp(
         ));
     }
     let bound = precondition_binding(bindings, name)?;
+    bound.refuse_file()?;
     let doc = planner.doc;
     let inst = instance(doc, bound)?
         .ok_or_else(|| Diagnostic::new(ErrorCode::CollectionConflict, "collection is absent"))?;
@@ -2285,6 +2683,7 @@ pub fn plan_insert(
     guard: &str,
     fields: &BTreeMap<String, Value>,
 ) -> Result<Change, Diagnostic> {
+    bound.refuse_file()?;
     let doc = planner.doc;
     let inst = instance(doc, bound)?.ok_or_else(|| {
         Diagnostic::new(
@@ -2464,6 +2863,12 @@ pub enum Cmp {
 
 pub fn check_clause(schema: &Schema, clause: &Clause) -> Result<(), Diagnostic> {
     let bad = |m: String| Diagnostic::new(ErrorCode::InvalidRequest, m);
+    if clause.field == "id" && schema.item == ItemShape::File {
+        return Err(bad(format!(
+            "{} holds file records, which are named by path and have no id",
+            schema.id
+        )));
+    }
     let kind = if clause.field == "id" {
         FieldType::String
     } else {
@@ -2484,11 +2889,16 @@ pub fn check_clause(schema: &Schema, clause: &Clause) -> Result<(), Diagnostic> 
         FieldType::Enum => v.as_str().is_some_and(|s| values.iter().any(|x| x == s)),
         FieldType::Boolean => v.is_boolean(),
         FieldType::Number => v.as_number().is_some_and(comparable),
+        FieldType::Timestamp => v.as_str().and_then(timestamp_instant).is_some(),
+        // Whole lists and entries are not compared; `contains` tests a list.
+        FieldType::List | FieldType::Entries => false,
     };
     let ok = match clause.op {
         Cmp::Exists | Cmp::Missing => clause.value.is_null(),
         Cmp::In => clause.value.as_array().is_some_and(|a| a.iter().all(fits)),
-        Cmp::Contains => kind == FieldType::String && clause.value.is_string(),
+        Cmp::Contains => {
+            matches!(kind, FieldType::String | FieldType::List) && clause.value.is_string()
+        }
         Cmp::Lt | Cmp::Lte | Cmp::Gt | Cmp::Gte => {
             kind != FieldType::Boolean && fits(&clause.value)
         }
@@ -2575,13 +2985,61 @@ pub(crate) fn cmp_decimal(a: &str, b: &str) -> Option<std::cmp::Ordering> {
     })
 }
 
+/// A clause against untyped values: strings compare as text.
 pub fn matches(fields: &Map<String, Value>, id: Option<&str>, clause: &Clause) -> bool {
+    matches_as(None, fields, id, clause)
+}
+
+/// A clause against a schema's fields: a timestamp compares by instant, so
+/// equal instants in different offsets are equal, and `contains` on a list
+/// tests its elements.
+pub fn matches_in(
+    schema: &Schema,
+    fields: &Map<String, Value>,
+    id: Option<&str>,
+    clause: &Clause,
+) -> bool {
+    let kind = schema.fields.get(&clause.field).map(|f| f.kind);
+    matches_as(kind, fields, id, clause)
+}
+
+fn matches_as(
+    kind: Option<FieldType>,
+    fields: &Map<String, Value>,
+    id: Option<&str>,
+    clause: &Clause,
+) -> bool {
     let value = if clause.field == "id" {
         id.map(|i| Value::String(i.into()))
     } else {
         fields.get(&clause.field).cloned()
     };
     use std::cmp::Ordering::*;
+    let instant = |v: &Value| v.as_str().and_then(timestamp_instant);
+    match (kind, clause.op, &value) {
+        (_, Cmp::Exists | Cmp::Missing, _) | (_, _, None) => {}
+        (Some(FieldType::Timestamp), op, Some(v)) => {
+            let Some(at) = instant(v) else { return false };
+            let cmp = |w: &Value| instant(w).map(|other| at.cmp(&other));
+            return match op {
+                Cmp::Eq => cmp(&clause.value) == Some(Equal),
+                Cmp::Ne => cmp(&clause.value).is_some_and(|o| o != Equal),
+                Cmp::In => clause
+                    .value
+                    .as_array()
+                    .is_some_and(|a| a.iter().any(|w| cmp(w) == Some(Equal))),
+                Cmp::Lt => cmp(&clause.value) == Some(Less),
+                Cmp::Lte => matches!(cmp(&clause.value), Some(Less | Equal)),
+                Cmp::Gt => cmp(&clause.value) == Some(Greater),
+                Cmp::Gte => matches!(cmp(&clause.value), Some(Greater | Equal)),
+                Cmp::Exists | Cmp::Missing | Cmp::Contains => false,
+            };
+        }
+        (Some(FieldType::List), Cmp::Contains, Some(v)) => {
+            return v.as_array().is_some_and(|a| a.contains(&clause.value));
+        }
+        _ => {}
+    }
     match (clause.op, value) {
         (Cmp::Exists, v) => v.is_some(),
         (Cmp::Missing, v) => v.is_none(),
@@ -2713,6 +3171,7 @@ pub(crate) fn validate_binding_paths(
 ) -> Result<(), Diagnostic> {
     for (field, patterns) in [
         ("files", &collection.files),
+        ("exclude_files", &collection.exclude_files),
         ("archive", &collection.archive),
     ] {
         validate_file_patterns(patterns).map_err(|mut d| {
@@ -2726,9 +3185,7 @@ pub(crate) fn validate_binding_paths(
 /// Check direct paths against both namespaces without loading a schema.
 pub(crate) fn validate_path_bindings(config: &ProjectConfig, path: &str) -> Result<(), Diagnostic> {
     for (name, collection) in &config.collections {
-        if matches_file_patterns(&collection.files, path)
-            || matches_file_patterns(&collection.archive, path)
-        {
+        if collection.selects(path) || matches_file_patterns(&collection.archive, path) {
             validate_binding_paths(name, collection)?;
         }
     }
@@ -2760,7 +3217,8 @@ pub fn plan_stamp_collections(
         crate::edit::Guard::new(crate::edit::GuardSubject::Native(Target::Document), guard);
     intent_guard.check(doc)?;
     let mut spans = vec![];
-    for bound in bindings {
+    // File records have no items to stamp; their binding is not a scope.
+    for bound in bindings.iter().filter(|b| !b.is_file()) {
         if let Some(inst) = instance(doc, bound)? {
             spans.extend(inst.spans(doc));
         }
@@ -2807,5 +3265,441 @@ mod pinned_tests {
             collection_revision(&doc, &bound, &inst),
             "rivet:v1:collection:37611eeca9c98d8682550333d321476c"
         );
+    }
+}
+
+#[cfg(test)]
+mod file_record_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn config(binding: Value) -> CollectionConfig {
+        serde_json::from_value(binding).unwrap()
+    }
+
+    fn bind(binding: Value, schema: Value) -> Result<Bound, Diagnostic> {
+        bind_bytes("c", config(binding), schema.to_string().as_bytes())
+    }
+
+    fn file_schema(fields: Value) -> Value {
+        json!({"id": "rec", "version": 1, "item": "file", "fields": fields})
+    }
+
+    fn file_binding() -> Value {
+        json!({"schema": "rec@1", "files": ["r/*.md"]})
+    }
+
+    fn checkbox_schema(extra: Value) -> Value {
+        let mut fields = json!({"done": {"type": "boolean", "from": "checkbox"}});
+        fields
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        json!({"id": "rec", "version": 1, "item": "checkbox", "fields": fields})
+    }
+
+    fn checkbox_binding() -> Value {
+        json!({"schema": "rec@1", "files": ["r/*.md"], "section": "Action"})
+    }
+
+    fn refused(result: Result<Bound, Diagnostic>, needle: &str) {
+        let e = result.expect_err(needle);
+        assert_eq!(e.code, ErrorCode::InvalidSchema, "{}", e.message);
+        assert!(
+            e.message.contains(needle),
+            "{needle:?} not in {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn binding_settings_follow_the_schema_shape() {
+        let status = json!({"status": {"type": "string", "from": "key", "key": "status"}});
+        assert!(
+            bind(file_binding(), file_schema(status.clone()))
+                .unwrap()
+                .is_file()
+        );
+        for (setting, value) in [
+            ("section", json!("Action")),
+            ("level", json!(2)),
+            ("subsections", json!(true)),
+            ("exclude", json!(["Plans"])),
+            ("archive", json!(["archive/*.md"])),
+        ] {
+            let mut binding = file_binding();
+            binding[setting] = value;
+            if setting == "exclude" {
+                binding["subsections"] = json!(true);
+                refused(bind(binding, file_schema(status.clone())), "does not apply");
+            } else {
+                refused(bind(binding, file_schema(status.clone())), setting);
+            }
+        }
+        let mut binding = checkbox_binding();
+        binding["exclude_files"] = json!(["r/index.md"]);
+        refused(bind(binding, checkbox_schema(json!({}))), "exclude_files");
+        let mut binding = checkbox_binding();
+        binding.as_object_mut().unwrap().remove("section");
+        refused(bind(binding, checkbox_schema(json!({}))), "needs section");
+        let mut binding = file_binding();
+        binding["exclude_files"] = json!([".hidden/index.md"]);
+        refused(bind(binding, file_schema(status)), "exclude_files");
+    }
+
+    #[test]
+    fn key_fields_are_validated() {
+        let ok = |fields: Value| bind(file_binding(), file_schema(fields));
+        let key = |kind: &str| json!({"type": kind, "from": "key", "key": "k"});
+        for kind in [
+            "string",
+            "boolean",
+            "number",
+            "date",
+            "timestamp",
+            "list",
+            "entries",
+        ] {
+            ok(json!({"f": key(kind)})).unwrap();
+        }
+        ok(json!({"f": {"type": "enum", "from": "key", "key": "k", "values": ["a"]}})).unwrap();
+        ok(json!({
+            "by": {"type": "string", "from": "key", "key": "generated", "field": "by"},
+            "at": {"type": "timestamp", "from": "key", "key": "generated", "field": "at"}}))
+        .unwrap();
+        // A file schema reads keys only, and a checkbox schema none.
+        refused(
+            ok(json!({"t": {"type": "string", "from": "title"}})),
+            "frontmatter key",
+        );
+        refused(
+            bind(
+                checkbox_binding(),
+                checkbox_schema(json!({"s": key("string")})),
+            ),
+            "file records",
+        );
+        for (fields, needle) in [
+            (
+                json!({"f": {"type": "string", "from": "key"}}),
+                "do not fit",
+            ),
+            (
+                json!({"f": {"type": "string", "from": "key", "key": "-k"}}),
+                "key \"-k\"",
+            ),
+            (
+                json!({"f": {"type": "string", "from": "key", "key": "a b"}}),
+                "ASCII",
+            ),
+            (
+                json!({"f": {"type": "string", "from": "key", "key": "k", "field": ".x"}}),
+                "field \".x\"",
+            ),
+            (
+                json!({"f": {"type": "list", "from": "key", "key": "k", "field": "x"}}),
+                "do not fit",
+            ),
+            (
+                json!({"f": {"type": "entries", "from": "key", "key": "k", "field": "x"}}),
+                "do not fit",
+            ),
+            (
+                json!({"f": {"type": "list", "from": "key", "key": "k", "default": []}}),
+                "default",
+            ),
+            (
+                json!({"f": {"type": "entries", "from": "key", "key": "k", "default": []}}),
+                "default",
+            ),
+            (
+                json!({"f": {"type": "timestamp", "from": "key", "key": "k", "default": "2026-01-01"}}),
+                "default",
+            ),
+            (
+                json!({"a": key("string"), "b": key("number")}),
+                "already reads k",
+            ),
+            (
+                json!({
+                    "a": {"type": "string", "from": "key", "key": "k", "field": "x"},
+                    "b": {"type": "string", "from": "key", "key": "k", "field": "x"}}),
+                "already reads k.x",
+            ),
+            (
+                json!({
+                    "a": key("string"),
+                    "b": {"type": "string", "from": "key", "key": "k", "field": "x"}}),
+                "whole and through a field",
+            ),
+            (
+                json!({
+                    "b": {"type": "string", "from": "key", "key": "k", "field": "x"},
+                    "c": key("string")}),
+                "whole and through a field",
+            ),
+            (
+                json!({"f": {"type": "string", "from": "key", "key": "k", "label": "L"}}),
+                "not tags, label or multiline",
+            ),
+            (json!({"id": key("string")}), "reserved"),
+        ] {
+            refused(ok(fields), needle);
+        }
+        refused(
+            bind(
+                checkbox_binding(),
+                checkbox_schema(
+                    json!({"g": {"type": "string", "from": "label", "label": "G", "key": "k"}}),
+                ),
+            ),
+            "key and field are for from key",
+        );
+        refused(
+            bind(
+                checkbox_binding(),
+                checkbox_schema(json!({"g": {"type": "list", "from": "label", "label": "G"}})),
+            ),
+            "do not fit",
+        );
+        // A checkbox label may hold a timestamp.
+        bind(
+            checkbox_binding(),
+            checkbox_schema(json!({"g": {"type": "timestamp", "from": "label", "label": "G"}})),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn timestamps_are_strict_and_compare_by_instant() {
+        for ok in [
+            "2026-12-31T00:00:00Z",
+            "2026-12-31T23:59:59+13:00",
+            "2026-12-31T23:59:59-05:30",
+            "2026-12-31T23:59:59.5Z",
+            "2026-12-31T23:59:59.123456789Z",
+            "2024-02-29T12:00:00Z",
+            "1969-12-31T23:59:59Z",
+        ] {
+            assert!(timestamp_instant(ok).is_some(), "{ok}");
+        }
+        for bad in [
+            "2026-12-31",
+            "2026-12-31T00:00:00",
+            "2026-12-31 00:00:00Z",
+            "2026-12-31t00:00:00Z",
+            "2026-12-31T00:00:00z",
+            "2026-12-31T24:00:00Z",
+            "2026-12-31T23:60:00Z",
+            "2026-12-31T23:59:60Z",
+            "2026-02-30T00:00:00Z",
+            "2025-02-29T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-12-31T00:00:00.Z",
+            "2026-12-31T00:00:00.1234567890Z",
+            "2026-12-31T00:00:00+1300",
+            "2026-12-31T00:00:00+24:00",
+            "2026-12-31T00:00:00+13:60",
+            "2026-12-31T00:00:00Z ",
+            "2026-12-31T0:00:00Z",
+            "２026-12-31T00:00:00Z",
+        ] {
+            assert!(timestamp_instant(bad).is_none(), "{bad}");
+        }
+        let at = |s| timestamp_instant(s).unwrap();
+        assert_eq!(at("1970-01-01T00:00:00Z"), 0);
+        assert_eq!(at("1970-01-01T00:00:01.5Z"), 1_500_000_000);
+        assert!(at("2026-12-31T23:00:00-05:00") > at("2026-12-31T20:00:00Z"));
+        assert_eq!(at("2026-12-31T20:00:00-05:00"), at("2027-01-01T01:00:00Z"));
+        assert_eq!(
+            at("2026-12-31T23:59:59.999Z") + 1_000_000,
+            at("2027-01-01T00:00:00Z")
+        );
+
+        let schema: Schema = serde_json::from_value(file_schema(json!({
+            "at": {"type": "timestamp", "from": "key", "key": "at"},
+            "tags": {"type": "list", "from": "key", "key": "tags"},
+            "label": {"type": "string", "from": "key", "key": "label"}})))
+        .unwrap();
+        let clause = |field: &str, op: &str, value: Value| -> Clause {
+            serde_json::from_value(json!({"field": field, "op": op, "value": value})).unwrap()
+        };
+        let fields = json!({"at": "2026-12-31T23:00:00-05:00", "tags": ["a", "b"],
+            "label": "2026-12-31T23:00:00-05:00"});
+        let fields = fields.as_object().unwrap();
+        let hit = |c: &Clause| {
+            check_clause(&schema, c).unwrap();
+            matches_in(&schema, fields, None, c)
+        };
+        assert!(hit(&clause("at", "gt", json!("2026-12-31T20:00:00Z"))));
+        assert!(hit(&clause("at", "eq", json!("2027-01-01T04:00:00Z"))));
+        assert!(!hit(&clause("at", "ne", json!("2027-01-01T04:00:00Z"))));
+        assert!(hit(&clause("at", "in", json!(["2027-01-01T04:00:00Z"]))));
+        assert!(hit(&clause("at", "lte", json!("2027-01-01T04:00:00Z"))));
+        assert!(!hit(&clause("at", "lt", json!("2027-01-01T04:00:00Z"))));
+        // A string field holding the same text compares as text.
+        assert!(!hit(&clause("label", "gt", json!("2026-12-31T23:30:00Z"))));
+        assert!(hit(&clause("tags", "contains", json!("b"))));
+        assert!(!hit(&clause("tags", "contains", json!("c"))));
+        for (field, op, value) in [
+            ("at", "lt", json!("2026-12-31")),
+            ("at", "eq", json!("2026-12-31T00:00:00")),
+            ("at", "contains", json!("2026")),
+            ("tags", "eq", json!(["a", "b"])),
+            ("tags", "contains", json!(1)),
+            ("tags", "in", json!([["a"]])),
+            ("tags", "lt", json!("a")),
+            ("id", "eq", json!("x")),
+        ] {
+            let e = check_clause(&schema, &clause(field, op, value)).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    fn read(fields: Value, text: &str) -> Result<Map<String, Value>, RecordError> {
+        let bound = bind(file_binding(), file_schema(fields)).unwrap();
+        record(&Document::parse(text).unwrap(), &bound)
+    }
+
+    #[test]
+    fn records_read_lists_and_entries_in_flow_and_block_forms() {
+        let fields = json!({
+            "tags": {"type": "list", "from": "key", "key": "tags"},
+            "verified": {"type": "entries", "from": "key", "key": "verified"},
+            "sources": {"type": "entries", "from": "key", "key": "sources"}});
+        let flow = "---\ntags: [a, \"b c\"]\nverified: [{by: x, at: 2026-01-01T00:00:00Z}]\nsources: []\n---\n";
+        let got = read(fields.clone(), flow).unwrap();
+        assert_eq!(got["tags"], json!(["a", "b c"]));
+        assert_eq!(
+            got["verified"],
+            json!([{"by": "x", "at": "2026-01-01T00:00:00Z"}])
+        );
+        assert_eq!(got["sources"], json!([]));
+        let block = "---\ntags:\n  - a\n  - b\nverified:\n  - {by: x, at: 1}\n  - {by: y, at: 2}\nsources:\n  - url: u\n    title: t\n---\n";
+        let got = read(fields.clone(), block).unwrap();
+        assert_eq!(got["tags"], json!(["a", "b"]));
+        assert_eq!(
+            got["verified"],
+            json!([{"by": "x", "at": 1}, {"by": "y", "at": 2}])
+        );
+        assert_eq!(got["sources"], json!([{"url": "u", "title": "t"}]));
+        // A bare flat mapping is one entry.
+        let bare = "---\nverified: {by: x, at: 2026-01-01T00:00:00Z}\n---\n";
+        assert_eq!(
+            read(fields.clone(), bare).unwrap()["verified"],
+            json!([{"by": "x", "at": "2026-01-01T00:00:00Z"}])
+        );
+        let bare_block = "---\nverified:\n  by: x\n  at: 1\n---\n";
+        assert_eq!(
+            read(fields.clone(), bare_block).unwrap()["verified"],
+            json!([{"by": "x", "at": 1}])
+        );
+        for bad in [
+            "---\ntags: [a, 1]\n---\n",
+            "---\ntags: a\n---\n",
+            "---\ntags: [[a]]\n---\n",
+            "---\nverified: [a]\n---\n",
+            "---\nverified: [{by: [x]}]\n---\n",
+            "---\nverified: {by: {name: x}}\n---\n",
+            "---\nverified: x\n---\n",
+        ] {
+            assert!(
+                matches!(read(fields.clone(), bad), Err(RecordError::Fields(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn records_read_scalars_without_coercion() {
+        let fields = json!({
+            "kind": {"type": "string", "from": "key", "key": "type", "required": true},
+            "status": {"type": "enum", "from": "key", "key": "status", "values": ["draft", "current"], "default": "draft"},
+            "pinned": {"type": "boolean", "from": "key", "key": "pinned"},
+            "rank": {"type": "number", "from": "key", "key": "rank"},
+            "reviewed": {"type": "date", "from": "key", "key": "reviewed"},
+            "stale": {"type": "timestamp", "from": "key", "key": "stale_after"},
+            "by": {"type": "string", "from": "key", "key": "generated", "field": "by"},
+            "at": {"type": "timestamp", "from": "key", "key": "generated", "field": "at"}});
+        let text = "---\ntype: Metric\npinned: true\nrank: 3\nreviewed: 2026-11-02\nstale_after: 2026-12-31T00:00:00Z\ngenerated: {by: agent, at: 2026-11-01T09:30:00+13:00}\n---\nbody\n";
+        let got = read(fields.clone(), text).unwrap();
+        assert_eq!(
+            Value::Object(got),
+            json!({"kind": "Metric", "status": "draft", "pinned": true, "rank": 3,
+                "reviewed": "2026-11-02", "stale": "2026-12-31T00:00:00Z",
+                "by": "agent", "at": "2026-11-01T09:30:00+13:00"})
+        );
+        // Absent, empty and null keys are all absent: required applies, and
+        // default fills in.
+        for text in [
+            "---\nother: 1\n---\n",
+            "---\ntype:\n---\n",
+            "---\ntype: null\n---\n",
+        ] {
+            let Err(RecordError::Fields(errors)) = read(fields.clone(), text) else {
+                panic!("{text}")
+            };
+            assert_eq!(errors, ["kind: required field missing"], "{text}");
+        }
+        // An absent mapping field, or an absent parent, is absent.
+        let got = read(
+            fields.clone(),
+            "---\ntype: X\ngenerated: {by: agent}\n---\n",
+        )
+        .unwrap();
+        assert!(!got.contains_key("at") && got["by"] == "agent");
+        for (bad, field) in [
+            ("---\ntype: X\npinned: yes\n---\n", "pinned"),
+            ("---\ntype: X\nrank: \"3\"\n---\n", "rank"),
+            (
+                "---\ntype: X\nreviewed: 2026-11-02T00:00:00Z\n---\n",
+                "reviewed",
+            ),
+            ("---\ntype: X\nstale_after: 2026-12-31\n---\n", "stale"),
+            (
+                "---\ntype: X\nstale_after: \"2026-12-31T00:00:00\"\n---\n",
+                "stale",
+            ),
+            ("---\ntype: X\nstatus: retired\n---\n", "status"),
+            ("---\ntype: [X]\n---\n", "kind"),
+            ("---\ntype: X\ngenerated: agent\n---\n", "by"),
+            ("---\ntype: X\ngenerated: {by: [a]}\n---\n", "by"),
+        ] {
+            let Err(RecordError::Fields(errors)) = read(fields.clone(), bad) else {
+                panic!("{bad}")
+            };
+            assert!(
+                errors.iter().any(|e| e.starts_with(&format!("{field}:"))),
+                "{bad}: {errors:?}"
+            );
+        }
+        assert!(matches!(
+            read(fields.clone(), "no frontmatter\n"),
+            Err(RecordError::NoFrontmatter)
+        ));
+        let Err(RecordError::Unsupported(d)) = read(fields, "---\na: &x 1\n---\n") else {
+            panic!("unsupported frontmatter")
+        };
+        assert!(d.span.is_some());
+    }
+
+    #[test]
+    fn the_record_revision_covers_the_frontmatter_block_by_path() {
+        let bound = bind(
+            file_binding(),
+            file_schema(json!({"s": {"type": "string", "from": "key", "key": "s"}})),
+        )
+        .unwrap();
+        let rev =
+            |path: &str, text: &str| record_revision(&Document::parse(text).unwrap(), path, &bound);
+        let base = rev("r/a.md", "---\ns: x\n---\nbody\n");
+        assert!(base.starts_with("rivet:v1:record:"));
+        assert_eq!(base, rev("r/a.md", "---\ns: x\n---\nother body\n"));
+        assert_eq!(base, rev("r/a.md", "\u{feff}---\ns: x\n---\nbody\n"));
+        assert_ne!(base, rev("r/b.md", "---\ns: x\n---\nbody\n"));
+        assert_ne!(base, rev("r/a.md", "---\ns: x\nt: 1\n---\nbody\n"));
+        assert_ne!(base, rev("r/a.md", "---\ns: x # note\n---\nbody\n"));
+        assert_ne!(base, rev("r/a.md", "---\ns: x\n---\r\nbody\n"));
+        assert_ne!(base, rev("r/a.md", "body\n"));
     }
 }

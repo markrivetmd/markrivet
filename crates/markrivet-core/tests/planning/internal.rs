@@ -6,7 +6,7 @@ const SOURCE: &str = "# A\n\n- [ ] first <!-- stay:first subhash=sha256:00000000
 
 fn bound(section: &str) -> schema::Bound {
     schema::bind_bytes("tasks", schema::CollectionConfig {
-        schema: "tasks@1".into(), files: vec!["**/*.md".into()], section: section.into(),
+        schema: "tasks@1".into(), files: vec!["**/*.md".into()], exclude_files: vec![], section: Some(section.into()),
         level: Some(1), subsections: false, exclude: vec![], archive: vec![],
     }, br#"{"id":"tasks","version":1,"item":"checkbox","fields":{"done":{"type":"boolean","from":"checkbox"},"text":{"type":"string","from":"text"}}}"#).unwrap()
 }

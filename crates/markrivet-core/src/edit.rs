@@ -303,7 +303,7 @@ pub(crate) fn new_key_site(doc: &Document, key: &str) -> Result<Span, Diagnostic
 
 /// The name rule every key Rivet adds shares, top-level or inside a new
 /// sequence item.
-fn check_key_name(what: &str, key: &str) -> Result<(), Diagnostic> {
+pub(crate) fn check_key_name(what: &str, key: &str) -> Result<(), Diagnostic> {
     if key.is_empty()
         || !key
             .chars()

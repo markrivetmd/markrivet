@@ -452,12 +452,8 @@ fn current_bound(
     id: &str,
 ) -> Result<(crate::schema::Bound, State), Diagnostic> {
     let bound = crate::schema::bind(project, collection)?;
-    if !bound
-        .config
-        .files
-        .iter()
-        .any(|g| crate::schema::glob(g, path))
-    {
+    bound.refuse_file()?;
+    if !bound.config.selects(path) {
         return Err(Diagnostic::new(
             ErrorCode::InvalidRequest,
             "path is outside this collection",

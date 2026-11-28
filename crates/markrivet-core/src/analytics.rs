@@ -54,6 +54,8 @@ impl Metadata {
             tags: vec![],
             label: None,
             multiline: false,
+            key: None,
+            field: None,
             default: None,
         }
     }
@@ -83,6 +85,12 @@ impl Declaration {
                 || f.key.is_empty()
                 || f.key.iter().any(|k| k.is_empty())
                 || f.options.keys().any(|k| k != "default")
+                // Analytics reads the checkbox-era types only; the file-record
+                // types are not metadata types.
+                || matches!(
+                    f.kind,
+                    FieldType::Timestamp | FieldType::List | FieldType::Entries
+                )
             {
                 return Err(bad(format!("invalid metadata declaration {name}")));
             }
@@ -358,6 +366,7 @@ impl Context {
             }
             Ok(bytes)
         })?;
+        bound.refuse_file()?;
         crate::fs::hook("analytics_config")?;
         let declaration = if let Some(name) = &q.analytics {
             if !plain(name) {
@@ -440,6 +449,18 @@ impl Context {
     }
     fn clause(&self, q: &Query, c: &Clause) -> Result<(), Diagnostic> {
         let f = self.spec(q, &c.field)?;
+        // Analytics predicates compare values untyped, so a timestamp would
+        // order as text; such a field is read, never filtered on here.
+        if matches!(
+            f.kind,
+            FieldType::Timestamp | FieldType::List | FieldType::Entries
+        ) {
+            return Err(bad(format!(
+                "analytics does not filter on {}, a {:?} field; use query",
+                c.field, f.kind
+            )
+            .to_lowercase()));
+        }
         // Nullable metadata admits explicit null equality; no coercion otherwise.
         let nullable = c
             .field
@@ -532,6 +553,8 @@ fn string_spec() -> FieldSpec {
         tags: vec![],
         label: None,
         multiline: false,
+        key: None,
+        field: None,
         default: None,
     }
 }

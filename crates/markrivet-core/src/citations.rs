@@ -374,10 +374,14 @@ pub fn scope(
     let archives: BTreeSet<_> = config.archive_patterns().into_iter().collect();
     let all: Vec<String> = live.union(&archives).cloned().collect();
     let (found, events) = project.observe_with(&all, None, faults);
-    let live_patterns: Vec<_> = live.into_iter().collect();
+    // A found file is live when some binding selects it, archived when an
+    // archive glob matches it, and otherwise (a file only `exclude_files`
+    // keeps out) not a carrier at all.
+    let archive_patterns: Vec<_> = archives.into_iter().collect();
     let (live, archive): (Vec<String>, Vec<String>) = found
         .into_iter()
-        .partition(|p| schema::matches_file_patterns(&live_patterns, p));
+        .filter(|p| config.live_member(p) || schema::matches_file_patterns(&archive_patterns, p))
+        .partition(|p| config.live_member(p));
     let mut files: Vec<(String, bool)> = live.into_iter().map(|p| (p, false)).collect();
     files.extend(archive.into_iter().map(|p| (p, true)));
     (files, events, diagnostics)
