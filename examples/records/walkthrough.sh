@@ -45,7 +45,9 @@ echo "{\"path\": \"$C\"}" | "$rivet" map \
   | expect ".collections[0] | .item == \"file\" and .valid and .revision == \"$guard\""
 
 step "3. Make it current, push stale_after out and record the check, in one write"
-before=$(cat "$C")
+cp "$C" "$work/before.md"
+# A sentinel keeps trailing newlines, which $(...) would strip.
+before=$(cat "$C"; printf x); before=${before%x}
 result=$(jq -n --arg path "$C" --arg guard "$guard" '{
   path: $path, collection: "concepts", guard: $guard,
   set: {status: "current", stale_after: "2027-06-30T00:00:00Z"},
@@ -57,8 +59,9 @@ old_entry='  - {by: "human:wren", at: 2026-11-02T10:00:00Z}'
 want=${before/$'\n'status: draft$'\n'/$'\n'status: current$'\n'}
 want=${want/$'\n'stale_after: 2026-12-31T00:00:00Z$'\n'/$'\n'stale_after: 2027-06-30T00:00:00Z$'\n'}
 want=${want/$'\n'$old_entry$'\n'/$'\n'$old_entry$'\n''  - {by: "human:wren", at: 2026-11-28T09:00:00Z}'$'\n'}
-[ "$(cat "$C")" = "$want" ] || { echo "the write changed other bytes" >&2; diff <(echo "$want") "$C" >&2; exit 1; }
-[ "$(body "$C")" = "$(body <(echo "$before"))" ] || { echo "the body changed" >&2; exit 1; }
+printf '%s' "$want" > "$work/want.md"
+cmp -s "$work/want.md" "$C" || { echo "the write changed other bytes" >&2; diff "$work/want.md" "$C" >&2; exit 1; }
+cmp -s <(body "$work/before.md") <(body "$C") || { echo "the body changed" >&2; exit 1; }
 
 step "4. Query again: nothing is stale, and the record carries both checks"
 echo '{"collection": "concepts",
