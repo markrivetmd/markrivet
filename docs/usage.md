@@ -970,8 +970,10 @@ equals-delimited and multiline injection variants.
 
 `move` transfers one native, stayed checkbox item or section subtree between two existing live
 documents. It requires per-write commits with `on_dirty: refuse`. Both paths
-must already be canonical, distinct, match a live collection or section-history
-glob, and match no archive glob.
+must already be canonical, distinct, be selected by a collection (its `files`
+match and no `exclude_files` glob does; § File records) or match a
+section-history glob, and match no archive glob. Recovery checks both paths
+again.
 
 ```json
 {"source":"tracking/TRACKING_WIDGETS.md","id":"<stay id>",
